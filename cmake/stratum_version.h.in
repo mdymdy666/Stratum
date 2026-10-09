@@ -1,0 +1,21 @@
+// Copyright 2026 Stratum Project
+// SPDX-License-Identifier: Apache-2.0
+//
+// 版本信息（由 CMake 生成）
+
+#ifndef STRATUM_VERSION_H_
+#define STRATUM_VERSION_H_
+
+#define STRATUM_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define STRATUM_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define STRATUM_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define STRATUM_VERSION_STRING "@PROJECT_VERSION@"
+
+namespace stratum {
+// 运行时版本字符串
+constexpr const char* kVersionString = "@PROJECT_VERSION@";
+// 磁盘格式版本（与 core/types.h 的 SessionMetadata::format_version 对应）
+constexpr uint32_t kFormatVersion = 1;
+}  // namespace stratum
+
+#endif  // STRATUM_VERSION_H_

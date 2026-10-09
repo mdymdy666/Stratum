@@ -1,0 +1,43 @@
+# 构建产物（build/ 有 400MB+，build-asan/ 50MB，绝不入库）
+build/
+build-*/
+cmake-build-*/
+
+# 编译中间与产物
+*.o
+*.a
+*.so
+*.so.*
+*.d
+*.gcda
+*.gcno
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# 编辑器 / IDE / 系统
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# 运行期数据（时间线目录等，可由脚本重新生成）
+*.ldb
+*.sst
+CURRENT
+MANIFEST-*
+LOCK
+LOG
+LOG.old
+
+# Python
+__pycache__/
+*.pyc
+.venv/
