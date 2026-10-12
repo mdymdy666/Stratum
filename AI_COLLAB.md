@@ -3647,3 +3647,68 @@ VMware 的 NAT 支持 UDP，但**改配置与重启服务都需要管理员**。
 * 虚拟机内 `ens224` 的 `stratum-bridge` 连接仍然存在，但网卡已消失，
   不影响任何东西（重启后不会生效）；
 * **WSL 仍是 mirrored**（尚未回滚）——若走路径 A 需要先改回 NAT。
+
+---
+
+## 2026-10-12（续 51）| 路径 A 实施：准备 WSL 回 NAT + 写 UDP 中继
+
+### 一、数据流设计（为什么这样能通）
+
+两边都能到达 Windows，于是让 Windows 当**双向 UDP 中继**：
+
+```
+WSL   --(目标 = 192.168.100.2)--> 中继 --(转给 192.168.100.129)--> 虚拟机
+虚拟机 --(目标 = 172.17.208.1)--> 中继 --(转给 172.17.211.143)--> WSL
+```
+
+两个目标地址都是 **Windows 自己的接口地址**：
+
+| 地址 | 含义 |
+|---|---|
+| `192.168.100.2` | VMware NAT 网关（VMnet8，Windows 侧） |
+| `172.17.208.1` | WSL NAT 网关（`vEthernet (WSL)`，Windows 侧） |
+
+**关键点**：中继绑定的是 **Windows 的**这两个地址，
+而 WSL/虚拟机各自绑的是它们**自己的**地址 —— **不冲突**，且**不需要管理员**。
+
+**因此两侧 Stratum 需要声明中继侧地址**：
+* **WSL 侧**：`advertised_address = 172.17.208.1`
+* **虚拟机侧**：`advertised_address = 192.168.100.2`
+
+> 注意：中继会改写源地址（变成宿主机地址）。RTPS 的 locator 走的是
+> SPDP/SEDP **载荷里我们声明的地址**，而不是包源地址，所以发现逻辑仍然成立。
+
+### 二、产出
+
+| 文件 | 作用 |
+|---|---|
+| `tools/udp_relay.py` | 双向 UDP 中继（跑在 Windows，普通用户权限即可） |
+| `tools/wsl_netmode.py` | WSL 网络模式切换（`status`/`mirrored`/`nat`） |
+
+两份都已复制到 Windows 侧 `E:\CodexWorkspace\LearnFastDDS\tools\`，方便直接 `python` 执行。
+
+### 三、用户需要执行的一步
+
+```powershell
+# 1) 把 WSL 改回 NAT（mirrored 对 VMware NAT 网段无效，且中继方案不需要它）
+python E:\CodexWorkspace\LearnFastDDS\tools\wsl_netmode.py nat
+wsl --shutdown
+```
+
+`wsl --shutdown` **会终止所有 WSL 会话**（包括本 agent 的 shell），
+重启后请重新开始对话，从本节接着做。
+
+### 四、重启后我要做的（下次会话）
+
+1. 查 WSL 的新 NAT 地址（`ip -4 -o addr show eth0`），确认是 `172.17.x.x`；
+2. 在 Windows 侧后台启动中继：
+   ```powershell
+   python E:\CodexWorkspace\LearnFastDDS\tools\udp_relay.py ^
+       --ports 9060,9061 --wsl <WSL的IP> --guest 192.168.100.129
+   ```
+3. 两侧跑 Stratum，并设置 `advertised_address`：
+   * WSL 侧：`STRATUM_ADVERTISED_ADDRESS=172.17.208.1`（若工具未暴露，需补一个环境变量入口）
+   * 虚拟机侧：`STRATUM_ADVERTISED_ADDRESS=192.168.100.2`
+   * **待办**：确认 `advertised_address` 是否已有环境变量接线；没有就补上
+     （`STRATUM_INITIAL_PEERS` 已有先例，同样做法）；
+4. 跑 `scenarios/22_cross_host.sh` 并给出量化结果。
