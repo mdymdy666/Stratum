@@ -3563,3 +3563,87 @@ netsh interface portproxy add v4tov4 listenaddress=192.168.100.1 listenport=9061
   ```
 * **待补做**：把 `scenarios/22_cross_host.sh` 同步到虚拟机
   （上一轮因网络中断未完成；网络恢复后补）。
+
+---
+
+## 2026-10-12（续 50）| 桥接方案实测失败（Wi-Fi 限制）并已回滚；给出可行路径
+
+### 一、按用户要求直接操作了 VMware 虚拟机
+
+| 步骤 | 操作 | 结果 |
+|---|---|---|
+| 定位虚拟机 | 用 `vmrun list` 找到 `F:\xvniji\Centos9_1kelong3\centos9_2.vmx` | ✅ |
+| 关机 | `vmrun stop <vmx> hard` | ✅ |
+| 备份 | `centos9_2.vmx.bak-before-bridge` | ✅ |
+| 加桥接网卡 | 写入 `ethernet1.*`（bridged / vmxnet3 / startConnected） | ✅ |
+| 启动 | `vmrun start <vmx> gui` | ✅ |
+| 虚拟机内 | 出现新网卡 **`ens224`**（原为 `ens160`） | ✅ |
+
+（`vmrun` 在 `F:\vmware\vmrun.exe`；`wmic` 已被系统移除，改用 `vmrun list` + 偏好设置定位。）
+
+### 二、桥接在 Wi-Fi 下不可用（根因确定）
+
+* 给 `ens224` 配静态 `10.162.200.10/16` 后，**第一次**从虚拟机 ping WSL
+  （`10.162.93.33`）**通过**（`0.580 ms`，仅丢前两个 ARP 包）；
+* 但用 `nmcli con up` 重新激活后，变成 **`目标主机不可达`（ARP 解析失败）**，
+  且宿主机 ping `10.162.200.10`、WSL ping 它**全部失败**；
+* 查宿主机：`10.162.93.33` 绑在 **`Wireless LAN adapter WLAN`** —— **宿主机走 Wi-Fi**。
+
+**结论**：**VMware 桥接在 Wi-Fi 上不可靠**（802.11 帧结构与以太网不同，
+无法完整转发"虚拟机 ↔ 网络上其他设备"）。这是经典限制，不是配置问题。
+
+**已回滚**：`vmrun stop` → 用备份覆盖 `.vmx`（确认 `ethernet0.connectionType = "nat"` 恢复、
+`ethernet1` 全部消失）→ 重启 → 宿主机 ping `192.168.100.129` **正常**（`time<1ms`）。
+
+### 三、端口转发也不通：**`netsh portproxy` 只支持 TCP**
+
+尝试添加转发规则时：
+```
+rc=1  The requested operation requires elevation (Run as administrator).
+```
+* 一方面**需要管理员**（我无法自行提权）；
+* 更关键的是 **`netsh interface portproxy` 仅支持 TCP**，而 **RTPS 全程走 UDP** ——
+  所以这条路**本质上也不适用于本项目**。
+
+### 四、当前网络拓扑（事实汇总）
+
+| 位置 | 地址 | 谁能访问它 |
+|---|---|---|
+| 虚拟机（VMware NAT） | `192.168.100.129` | Windows ✅ / WSL ❌ |
+| 虚拟机（桥接，已移除） | `10.162.200.10` | 单向、不可靠 |
+| WSL（mirrored） | `10.162.93.33` | Windows ✅ / 虚拟机 ❌ |
+| 宿主机 | `10.162.93.33`（Wi-Fi）、`192.168.100.1`（VMnet8） | — |
+
+**根本矛盾**：虚拟机在 VMware NAT 网段，WSL 在 Wi-Fi 物理网段，**两者之间没有路由**；
+而 Wi-Fi 又不支持把虚拟机桥接进物理网段。
+
+### 五、下一步可行路径（供用户选择）
+
+**路径 A：在 Windows 上跑一个双向 UDP 转发器（推荐，且不需要管理员）**
+
+思路：两边都可达 Windows，就让 Windows 当"中转站"。
+
+1. **先把 WSL 改回 NAT**（`python tools/wsl_netmode.py nat` + `wsl --shutdown`），
+   这样 WSL 的地址是 `172.17.x.x`、网关是 `172.17.208.1`（= Windows 的一个接口）；
+2. 写一个 Python 的 UDP 双向转发器（跑在 Windows，绑定两个接口地址与端口），
+   把 `172.17.208.1:9060/9061` ↔ `192.168.100.2:9060/9061` 对上；
+3. 两侧 Stratum 用 `advertised_address` 声明**对端可达的那个地址**
+   （WSL 侧声明 `172.17.208.1`，虚拟机侧声明 `192.168.100.2`）。
+
+**路径 B：在 VMware 的 NAT 里配端口转发**（需要管理员）
+编辑 `C:\ProgramData\VMware\vmnetnat.conf` 增加 UDP 转发并重启 VMware NAT 服务。
+VMware 的 NAT 支持 UDP，但**改配置与重启服务都需要管理员**。
+
+**路径 C：换一台真正独立的物理机/或把虚拟机网络改为"仅主机 + 宿主机共享"**
+超出当前可操作范围。
+
+**注意**：以上都需要用户参与一次（改 WSL 网络模式需 `wsl --shutdown`，
+或用管理员权限），我无法独自完成最后一步。
+
+### 六、已回滚项确认
+
+* `.vmx` 已恢复原状（仅 `ethernet0` = nat），备份保留在
+  `F:\xvniji\Centos9_1kelong3\centos9_2.vmx.bak-before-bridge`；
+* 虚拟机内 `ens224` 的 `stratum-bridge` 连接仍然存在，但网卡已消失，
+  不影响任何东西（重启后不会生效）；
+* **WSL 仍是 mirrored**（尚未回滚）——若走路径 A 需要先改回 NAT。
