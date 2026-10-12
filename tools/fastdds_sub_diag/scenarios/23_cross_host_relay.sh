@@ -19,9 +19,30 @@ set -u
 
 N="${1:-200}"
 DOMAIN="${DOMAIN:-30}"
+# RTPS 端口（随 domain 偏移，中继必须同时转发 SPDP 端口，否则永远发现不了彼此）：
+#   SPDP        = 7400 + d*250  -> domain 30 = 14900
+#   metatraffic = 9060 + d*10   -> domain 30 = 9360
+#   user data   = 9061 + d*10   -> domain 30 = 9361
+SPDP_PORT=$((7400 + DOMAIN * 250))
+META_PORT=$((9060 + DOMAIN * 10))
+USER_PORT=$((9061 + DOMAIN * 10))
 VM=192.168.100.129
-VM_ADV=192.168.100.2      # 虚拟机对外声明：VMware NAT 网关（Windows 侧）
-WSL_ADV=172.17.208.1      # WSL 对外声明：WSL NAT 网关（Windows 侧）
+# 地址关系（实测确认）：
+#   · 192.168.100.129 = 虚拟机自身
+#   · 192.168.100.1   = 宿主机在 VMnet8 上的接口（与虚拟机同网段，直连可达）
+#   · 192.168.100.2   = VMware NAT 的"内部网关"，**不是**宿主机的地址（绑不上）
+#   · 172.17.211.143  = WSL
+#
+# 因此：
+#   WSL -> 虚拟机   **直连可达**（实测 0% 丢包），不需要中继；
+#   虚拟机 -> WSL   **不可达**，需要中继：中继绑 192.168.100.1，转给 WSL。
+#
+# 于是两侧声明：
+#   WSL 侧 advertised_address = 192.168.100.1（虚拟机发到这里 -> 中继 -> WSL）
+#   虚拟机侧 advertised_address = 192.168.100.129（真实地址，WSL 直连可达）
+#   两侧 initial_peers 分别指向对方的"声明地址"。
+WSL_ADV=192.168.100.1
+VM_ADV=192.168.100.129
 VM_DIR=/reactor/DDSProject
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +57,7 @@ echo "=== 拓扑 ==="
 echo "  WSL   : $WSL_IP   （对外声明 $WSL_ADV）"
 echo "  虚拟机: $VM       （对外声明 $VM_ADV）"
 echo "  domain: $DOMAIN   条数: $N"
+echo "  端口: SPDP=$SPDP_PORT meta=$META_PORT user=$USER_PORT（中继必须转发这三个）"
 echo
 
 echo "=== 1) 前置检查 ==="
@@ -56,13 +78,14 @@ echo
 
 echo "=== 3) 虚拟机侧启动订阅端（后台，60 秒）==="
 $SSH "cd $VM_DIR && STRATUM_ADVERTISED_ADDRESS=$VM_ADV \
+      STRATUM_INITIAL_PEERS=$WSL_ADV \
       timeout 70 ./build/tools/rtps_reader_diag 60 $DOMAIN" \
     > "$LOGS/cross_vm_reader.log" 2>&1 &
 VMJOB=$!
 sleep 10
 
 echo "=== 4) WSL 侧回放 ==="
-STRATUM_ADVERTISED_ADDRESS="$WSL_ADV" STRATUM_DUMP=1 \
+STRATUM_ADVERTISED_ADDRESS="$WSL_ADV" STRATUM_INITIAL_PEERS="$VM_ADV" STRATUM_DUMP=1 \
     timeout 70 "$TOOLS/stratum_rtps_replay" "$TL" "$DOMAIN" 2.0 2>&1 \
     | grep -aE "已发布样本|发送窗口|has_user|ACKNACK 判定|发现话题" | tail -8
 sleep 12

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 #include <cstring>
@@ -55,6 +56,32 @@ int main(int argc, char** argv) {
   std::printf("READER_QOS reliability_kind=%u durability_kind=%u\n",
               cfg.requested_qos.reliability_kind,
               cfg.requested_qos.durability_kind);
+
+  // 【跨主机测试】本工具直接构造 RtpsReader，**不经过 RtpsBackend**，
+  // 所以 rtps_backend.cc 里的环境变量接线对它无效 —— 必须自己读这两个变量。
+  // 否则在 NAT + UDP 中继的拓扑下，本端既不会向对端单播 SPDP，
+  // 也不会声明对端可达的地址，双方永远发现不了彼此（本地实测过）。
+  if (const char* v = std::getenv("STRATUM_ADVERTISED_ADDRESS")) {
+    cfg.advertised_address = v;
+  }
+  if (const char* v = std::getenv("STRATUM_INITIAL_PEERS")) {
+    const std::string s(v);
+    size_t pos = 0;
+    while (pos <= s.size()) {
+      const size_t comma = s.find(',', pos);
+      std::string item = s.substr(
+          pos, comma == std::string::npos ? std::string::npos : comma - pos);
+      while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) {
+        item.erase(item.begin());
+      }
+      while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) {
+        item.pop_back();
+      }
+      if (!item.empty()) cfg.initial_peers.push_back(item);
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+  }
 
   Status s = reader.Open(cfg);
   if (!s.ok()) {

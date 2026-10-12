@@ -93,29 +93,37 @@ def main():
     ap.add_argument("--guest", default="192.168.100.129", help="guest address")
     ap.add_argument("--wsl-gw", default=WSL_GW)
     ap.add_argument("--guest-gw", default=VMWARE_GW)
+    ap.add_argument("--one-way", action="store_true",
+                    help="only relay guest -> WSL (bind guest-gw). "
+                         "Use when WSL can reach the guest directly, "
+                         "which is the case in this project.")
     args = ap.parse_args()
 
     ports = [int(p) for p in args.ports.split(",") if p.strip()]
 
     print("UDP relay starting")
-    print("  WSL   : %s  (advertises %s)" % (args.wsl, args.wsl_gw))
-    print("  guest : %s  (advertises %s)" % (args.guest, args.guest_gw))
+    print("  WSL   : %s  (relay forwards to it)" % args.wsl)
+    print("  guest : %s  (its packets arrive at %s)" % (args.guest, args.wsl_gw))
     print("  ports : %s" % ports)
     print()
 
     threads = []
     for port in ports:
-        # WSL -> guest : WSL sends to the VMware gateway address
-        t1 = threading.Thread(target=relay,
-                              args=(args.guest_gw, port, args.guest, port,
-                                    "wsl->guest:%d" % port), daemon=True)
-        # guest -> WSL : guest sends to the WSL gateway address
+        if not args.one_way:
+            # WSL -> guest : WSL sends to the address the guest advertises
+            t1 = threading.Thread(target=relay,
+                                  args=(args.guest_gw, port, args.guest, port,
+                                        "wsl->guest:%d" % port), daemon=True)
+            t1.start()
+            threads.append(t1)
+        # guest -> WSL : the guest sends to args.wsl_gw, which must be an
+        # address of THIS host that lies in the guest's subnet
+        # (192.168.100.1 = VMnet8 host interface).
         t2 = threading.Thread(target=relay,
                               args=(args.wsl_gw, port, args.wsl, port,
                                     "guest->wsl:%d" % port), daemon=True)
-        t1.start()
         t2.start()
-        threads += [t1, t2]
+        threads.append(t2)
 
     print("running; press Ctrl+C to stop")
     try:
