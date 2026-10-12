@@ -34,6 +34,22 @@ void ApplyExtra(const BackendConfig& config, uint16_t* meta_port,
 // 组播互不可达，双方永远发现不了彼此。这正是 Fast DDS initialPeersList
 // 要解决的问题；这里用环境变量传入，避免改动工具/公共接口。
 // 格式：STRATUM_INITIAL_PEERS="192.168.100.129,10.0.0.5"
+// 从环境变量 STRATUM_ADVERTISED_ADDRESS 读取"对外声明的地址"。
+//
+// 为什么需要（跨主机场景）：当本端位于 NAT 之后时，**本机探测到的地址
+// 对端并不一定可达** —— 例如 WSL 在 NAT 里探测到 172.17.211.143，而局域网内的
+// 虚拟机根本到不了这个地址。此时必须显式声明一个"对端可达的地址"
+// （典型做法是声明宿主机的 NAT 网关地址，再由宿主机上的 UDP 中继转发）。
+// 见 tools/udp_relay.py 与 AI_COLLAB.md 续 50/51。
+void ApplyAdvertisedAddressFromEnv(std::string* out) {
+  const char* v = std::getenv("STRATUM_ADVERTISED_ADDRESS");
+  if (v == nullptr) return;
+  std::string s(v);
+  while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+  if (!s.empty()) *out = s;
+}
+
 void ParseInitialPeersFromEnv(std::vector<std::string>* out) {
   const char* v = std::getenv("STRATUM_INITIAL_PEERS");
   if (v == nullptr) return;
@@ -76,6 +92,7 @@ RtpsSource::~RtpsSource() { Stop(); }
 
 Status RtpsSource::Start(SampleCallback callback) {
   ParseInitialPeersFromEnv(&reader_config_.initial_peers);
+  ApplyAdvertisedAddressFromEnv(&reader_config_.advertised_address);
   Status s = reader_.Open(reader_config_);
   if (!s.ok()) return s;
 
@@ -126,6 +143,7 @@ Status RtpsSink::Open() {
   }
 
   ParseInitialPeersFromEnv(&writer_config_.initial_peers);
+  ApplyAdvertisedAddressFromEnv(&writer_config_.advertised_address);
   Status s = writer_.Open(writer_config_);
   if (!s.ok()) return s;
   s = writer_.Start();

@@ -3712,3 +3712,22 @@ wsl --shutdown
    * **待办**：确认 `advertised_address` 是否已有环境变量接线；没有就补上
      （`STRATUM_INITIAL_PEERS` 已有先例，同样做法）；
 4. 跑 `scenarios/22_cross_host.sh` 并给出量化结果。
+
+### 五、实际产出（路径 A 第一部分完成）
+
+| 文件 | 作用 |
+|---|---|
+| `tools/udp_relay.py` | Windows 侧双向 UDP 中继（普通用户权限，无需管理员） |
+| `tools/wsl_netmode.py` | WSL 网络模式切换 |
+| `scenarios/23_cross_host_relay.sh` | **一键跨主机测试**（中继版）：自动取 WSL IP、SSH 起虚拟机订阅端、WSL 回放、汇总结果 |
+| `advertised_address` 环境变量入口 | 新增 `STRATUM_ADVERTISED_ADDRESS`（与 `STRATUM_INITIAL_PEERS` 同做法），**两侧可直接声明中继侧地址而无需改代码** |
+
+**单机基线（改完立即回归，全绿）**：`ctest` **33/33**、
+条数对账 A **200/200**、B **119/119**。
+
+**下次会话的操作顺序**：
+1. 用户执行 `python E:\CodexWorkspace\LearnFastDDS\tools\wsl_netmode.py nat` + `wsl --shutdown`；
+2. 我查新的 WSL IP，在 Windows 后台启动中继（`tools/udp_relay.py`）；
+3. 我跑 `scenarios/23_cross_host_relay.sh`，给出量化结果；
+4. 测试完成后按用户要求把 WSL 网络模式留在 NAT（本次回滚本身就是目标状态，
+   所以**不再需要额外的回滚步骤** —— 这反而简化了）。
