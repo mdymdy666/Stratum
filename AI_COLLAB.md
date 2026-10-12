@@ -3234,3 +3234,107 @@ Fast DDS 侧是 XML/环境变量配置）—— 但**前提是 Windows 侧得有
 即便单次赋值原子，"**取出并清空**"仍是两步复合操作，需 `mutex`
 或 `std::atomic<std::shared_ptr<T>>` 的 `exchange(nullptr)`。
 （已确认本项目内**没有** `m_pending` 与 `std::optional`，故按通用技术问题回答。）
+
+---
+
+## 2026-10-12（续 46）| 跨主机测试：环境已部署成功，但被 WSL NAT 反向可达性卡住
+
+### 一、用户提供的第二台主机
+
+| 项 | 值 |
+|---|---|
+| IP | `192.168.100.129` |
+| 工作目录 | `/reactor/DDSProject`（原为空） |
+| SSH | `root` / `root`（已配置公钥免密登录） |
+| 系统 | **CentOS 9**，内核较新，8 核 / 7.5 GiB 内存 / 61 GB 可用 |
+| 工具链 | `cmake` `ninja` `g++ 11.5` `make` `pkg-config` `git` `rsync` `python3` —— **齐全** |
+
+### 二、已完成：把 Stratum 完整部署到第二台主机 ✅
+
+1. **同步源码**（rsync，排除 `build/`、`.git/`、产物与日志）：299 文件 / 3.4 MB；
+2. **发现并解决两个外部依赖**（这是本项目"零依赖"说法的修正）：
+   * **LSMengine**：`src/CMakeLists.txt` 硬编码
+     `/UserData/LeaningLevelDB/LSMengine/{include,build-lib/libLSMengine.a}`。
+     → 把**源码同步到虚拟机的同一路径**并**原生编译**（20 秒，680 文件）。
+     之所以不直接搬 12.8 MB 的 `.a`：跨发行版（Ubuntu → CentOS）静态库有
+     glibc/libstdc++ ABI 风险，不值得为省几分钟冒险。
+   * **fastcdr**：`-I/opt/ros/jazzy/include/fastcdr`（**只用到头文件**，
+     CMakeLists 里没有链接它）。→ 头文件是纯文本、平台无关，同步 20 个文件 408 KB。
+     另把 `libfastcdr.so.2.2.7` 一起放好备用。
+3. **路径对齐策略**：Stratum 的 CMake 与 `build_tools.sh` 里有**硬编码绝对路径**。
+   在虚拟机上按**原路径**放置依赖（`/UserData/LeaningLevelDB/...`、`/opt/ros/jazzy/...`），
+   并为工具的输出路径建软链接 `/UserData/CodexWorkSpace/Stratum -> /reactor/DDSProject`，
+   从而**源码零改动**即可构建。
+4. **构建结果**：库与 33 个测试全部编过，`ctest` 通过；5 个协议工具
+   （`make_timeline`、`stratum_rtps_replay`、`stratum_rtps_record`、
+   `rtps_reader_diag`、`rtps_sink_diag2`）全部构建成功，`ldd` 无缺失。
+
+### 三、发现并修复一个真实缺陷：缺少单播发现（`initial_peers`）
+
+SPDP 默认**只发组播 `239.255.0.1` + 回环**，而**组播跨不过 NAT 边界**。
+这意味着跨主机时双方**永远发现不了彼此** —— Fast DDS 用 `initialPeersList` 解决这个问题，
+而 Stratum **此前没有等价能力**。
+
+**修复**：新增 `RtpsWriterConfig::initial_peers` / `RtpsReaderConfig::initial_peers`，
+`AnnounceOnce()`（writer）与 SPDP 发送（reader）改为"组播 + 回环 + 单播对端列表"；
+经环境变量 `STRATUM_INITIAL_PEERS="ip1,ip2"` 注入（不改工具/公共接口）。
+**单机回归零退化**：`ctest` 33/33、对账 200/200 与 118/118、场景 07 PASS。
+
+### 四、卡住的地方：WSL 是 NAT 模式，**反向不可达**
+
+实测（全部可复现）：
+
+| 方向 | 结果 |
+|---|---|
+| WSL → 虚拟机 | ✅ 通（SSH/rsync 全程成功，RTT 0.5 ms） |
+| **虚拟机 → WSL** | ❌ **不通**：`ping 172.17.211.143` **100% 丢包**；UDP 也收不到 |
+
+虚拟机对其余地址的可达性：
+
+| 目标 | 结果 | 含义 |
+|---|---|---|
+| `172.17.211.143`（WSL） | ❌ 不通 | NAT 屏障 |
+| `172.17.208.1`（WSL 网关） | ❌ 不通 | 同上 |
+| `10.255.255.254`（WSL DNS） | ❌ 不通 | 同上 |
+| **`192.168.100.1`（Windows VMnet 网卡）** | ✅ **通** | **这是可行的落点** |
+
+**为什么这会致命**：RTPS 是**双向**协议 —— 不只数据要过去，
+SPDP 公告、SEDP 订阅、ACKNACK 都必须能**回得来**。
+VSL 在 NAT 后面时，对端发不回任何东西，发现阶段就完不成。
+
+### 五、两条可行路线（都需要用户做一步操作，我无法自行完成）
+
+**路线 A（推荐）：把 WSL 改成 mirrored 网络模式**
+在 Windows 的 `C:\Users\m\.wslconfig` 里加：
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+然后 `wsl --shutdown` 重启 WSL。**效果**：WSL 与 Windows 共享网络栈，
+WSL 直接拥有 `192.168.100.1`（虚拟机可达），**且组播也能通**，
+`STRATUM_INITIAL_PEERS` 甚至可能不再需要。**最彻底。**
+
+**路线 B：Windows 端口转发**（需**管理员** PowerShell，且要在 WSL 侧设置 `advertised_address`）
+```powershell
+netsh interface portproxy add v4tov4 listenaddress=192.168.100.1 listenport=9060 connectaddress=172.17.211.143 connectport=9060
+netsh interface portproxy add v4tov4 listenaddress=192.168.100.1 listenport=9061 connectaddress=172.17.211.143 connectport=9061
+```
+再让 WSL 侧用 `advertised_address=192.168.100.1` 对外声明。
+（`9060/9061` 是 Stratum 在 domain 0 的 metatraffic/user 端口；换域要按 `+d*10` 调整。）
+
+**已备好测试脚本**：`scenarios/22_cross_host.sh`，两端各跑一次即可：
+```bash
+# 虚拟机侧（订阅）
+bash tools/fastdds_sub_diag/scenarios/22_cross_host.sh sub 30 192.168.100.1 60
+# WSL 侧（发布）
+bash tools/fastdds_sub_diag/scenarios/22_cross_host.sh pub 30 192.168.100.129 200
+```
+
+### 六、判定
+
+* **部署部分：完成** ✅（源码、依赖、构建、工具全部就绪，两台机器都能独立跑 Stratum）；
+* **网络前提：不满足** ❌ —— **这是环境/网络拓扑问题，不是代码缺陷**，
+  也已通过新增 `initial_peers` 消除了 Stratum 侧的发现能力缺口；
+* **不是"Windows 侧需要重新开发"**（无需在 Windows 上重建 DDS 依赖链，
+  虚拟机本身就是完整的 Linux 环境）—— 因此**没有触发用户设定的停止条件**；
+* **只差用户一步网络配置**，之后跨主机测试即可直接跑通。

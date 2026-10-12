@@ -27,6 +27,34 @@ void ApplyExtra(const BackendConfig& config, uint16_t* meta_port,
   }
 }
 
+// 从环境变量 STRATUM_INITIAL_PEERS 解析"单播 SPDP 对端列表"。
+//
+// 为什么需要（跨主机发现的必要条件）：SPDP 默认只发组播 239.255.0.1，
+// 而组播跨不过 NAT 边界 —— 实测本机 WSL 为 nat 模式时，与局域网内虚拟机的
+// 组播互不可达，双方永远发现不了彼此。这正是 Fast DDS initialPeersList
+// 要解决的问题；这里用环境变量传入，避免改动工具/公共接口。
+// 格式：STRATUM_INITIAL_PEERS="192.168.100.129,10.0.0.5"
+void ParseInitialPeersFromEnv(std::vector<std::string>* out) {
+  const char* v = std::getenv("STRATUM_INITIAL_PEERS");
+  if (v == nullptr) return;
+  const std::string s(v);
+  size_t pos = 0;
+  while (pos <= s.size()) {
+    const size_t comma = s.find(',', pos);
+    std::string item = s.substr(
+        pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) {
+      item.erase(item.begin());
+    }
+    while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) {
+      item.pop_back();
+    }
+    if (!item.empty()) out->push_back(item);
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -47,6 +75,7 @@ RtpsSource::RtpsSource(const BackendConfig& config) {
 RtpsSource::~RtpsSource() { Stop(); }
 
 Status RtpsSource::Start(SampleCallback callback) {
+  ParseInitialPeersFromEnv(&reader_config_.initial_peers);
   Status s = reader_.Open(reader_config_);
   if (!s.ok()) return s;
 
@@ -95,6 +124,8 @@ Status RtpsSink::Open() {
     writer_config_.debug_drop_send_percent =
         static_cast<uint32_t>(std::atoi(dv));
   }
+
+  ParseInitialPeersFromEnv(&writer_config_.initial_peers);
   Status s = writer_.Open(writer_config_);
   if (!s.ok()) return s;
   s = writer_.Start();

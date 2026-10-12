@@ -69,6 +69,14 @@ struct RtpsWriterConfig {
   // 跨主机通信必须声明可达地址，127.0.0.1 只在同机有效。
   std::string advertised_address;
 
+  // 【跨主机发现】单播 SPDP 对端列表（等价于 Fast DDS 的 initialPeersList）。
+  //
+  // 为什么必须有：SPDP 默认只发组播 239.255.0.1，而**组播跨不过 NAT 边界**
+  // （实测：本机 WSL 为 nat 模式，与局域网内虚拟机的组播不通）。
+  // 跨主机时必须显式告诉对方"往这个地址发 SPDP"，否则双方永远发现不了彼此。
+  // 可用环境变量 STRATUM_INITIAL_PEERS 传入（逗号分隔多个地址）。
+  std::vector<std::string> initial_peers;
+
   uint32_t announce_interval_ms = 200;
   uint32_t heartbeat_interval_ms = 100;
 

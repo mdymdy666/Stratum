@@ -753,12 +753,16 @@ void RtpsReader::AnnounceOnce() {
   if (fd_tx_ < 0 || spdp_payload_.empty()) return;
   const uint16_t port = static_cast<uint16_t>(
       7400 + config_.domain_id * 250);
-  const char* targets[2] = {"239.255.0.1", "127.0.0.1"};
-  for (const char* ip : targets) {
+  // 【跨主机发现】同 writer：NAT 下组播不通，需向单播对端列表发 SPDP。
+  std::vector<std::string> targets = {"239.255.0.1", "127.0.0.1"};
+  for (const auto& ip : config_.initial_peers) {
+    if (!ip.empty()) targets.push_back(ip);
+  }
+  for (const auto& ip : targets) {
     sockaddr_in dest{};
     dest.sin_family = AF_INET;
     dest.sin_port = htons(port);
-    dest.sin_addr.s_addr = ::inet_addr(ip);
+    dest.sin_addr.s_addr = ::inet_addr(ip.c_str());
     ::sendto(fd_tx_, spdp_payload_.data(), spdp_payload_.size(), 0,
              reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
   }
