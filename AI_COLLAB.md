@@ -3163,3 +3163,74 @@ E 组剩余：**E1 丢包注入**（写 UDP 代理，`tc netem` 不可用）、*
 * 原 **O3（无版本控制）关闭**：`docs/02` 移除该条，`docs/01` 新增 7.4 记录修复过程；
 * 至此 `docs/02-open-issues.md` 的 🔴 严重项里，只剩"跨主机未实测"与"高速回放丢包"
   两项**环境相关**的限制（均已论证为环境/对端决定，非本项目缺陷）。
+
+---
+
+## 2026-10-12（续 45）| Windows↔WSL 多主机通信探查：判定需在 Windows 侧重新开发，按指令停止定时任务
+
+### 一、用户指令
+
+> 设置定时任务每 30 分钟推进开发；对于多主机通信，尝试 Windows 侧与 WSL 通信；
+> **如果 Windows 侧需要重新开发，直接停止定时任务并向用户汇报。**
+
+定时任务已创建（`schedule-d7dc1f72`，every 1800s），探查后按指令**已删除**。
+
+### 二、探查结果（全部实测）
+
+**WSL 侧**：
+
+| 项 | 值 |
+|---|---|
+| 网络模式 | **`nat`**（**不是 `mirrored`**）→ **组播无法跨 WSL/Windows 边界**，SPDP 组播发现不可用 |
+| WSL IPv4 | `172.17.211.143`（eth0） |
+| 网关 | `172.17.208.1`（= Windows 侧 WSL 虚拟网卡） |
+| DNS | `10.255.255.254`（Windows 侧） |
+| 内核 | `6.6.87.2-microsoft-standard-WSL2` |
+
+**Windows 侧**（主机名 `DESKTOP-S3JHU55`）：
+
+| 项 | 值 |
+|---|---|
+| 地址 | `172.17.208.1`、`10.162.93.33`、`192.168.100.1`、`192.168.50.1` + IPv6 |
+| 构建工具 | `cmake` ✅（`D:\Program Files\CMake\bin`）、**`g++/gcc` ✅（MinGW `D:\MinGW_win64`）**、`python` ✅、`git` ✅ |
+| **缺失** | ❌ **`ninja`**、❌ **`cl`（无 MSVC）**、❌ **`clang++`** |
+| DDS/RTPS 实现 | **完全没有**（常见位置只搜到我们自己的工作区 `E:\CodexWorkspace\LearnFastDDS`） |
+
+**决定性证据**：
+
+1. **`/UserData` 不是 Windows 盘** —— `wslpath -w` 返回 `\\wsl.localhost\Ubuntu\UserData`，
+   即 **WSL 发行版内部的 ext4**；Windows 只能经 9p 慢速访问，**不适合作为构建树**。
+2. **现有 Fast DDS 二进制是 Linux 产物**：`file` 显示
+   `ELF 64-bit LSB pie executable, x86-64` —— **Windows 无法执行**。
+3. **Windows 侧无任何可用的 DDS 端点**。
+4. **Stratum 依赖 POSIX**（`epoll`、`socket`、`unistd` 等），**无法在 Windows 原生编译**。
+
+### 三、判定：**Windows 侧需要重新开发/构建** ✅（用户指出的停止条件成立）
+
+要真正跑通"Windows ↔ WSL"的 RTPS 通信，至少需要下列之一：
+
+| 路线 | 工作量与障碍 |
+|---|---|
+| 把 Fast DDS（+ Fast-CDR + asio + tinyxml2 等依赖）复制到 Windows 并用 **MinGW + cmake** 重建 | 依赖链长；**Fast DDS 对 MinGW 支持不完整**；上游只读（可复制但不可改）；Windows 侧**无 ninja/MSVC** |
+| 为 Stratum 做 **Windows 端口**（WinSock + IOCP 替换 epoll） | 相当于重写传输层，**远超本次任务范围** |
+| 换用 WSL 的 **mirrored 网络模式**（`.wslconfig` 里 `networkingMode=mirrored`） | **能解决组播问题，但仍无 Windows 侧端点** —— 老问题不变 |
+
+**注**：NAT 模式下的"组播不通"本身**不需要写代码**（改用 `initialPeersList` 单播发现即可，
+Fast DDS 侧是 XML/环境变量配置）—— 但**前提是 Windows 侧得有一个能跑的端点**，而它不具备。
+
+### 四、已做的事
+
+* 按用户指令**删除定时任务**（id `schedule-d7dc1f72-46d5-4ab2-8198-8e22971fab59`）；
+* 本轮**未改动任何代码**（纯探查），故基线无需重跑；
+* 结论：**这一条多主机路线在当前环境下不可行**，需要用户决策（见汇报）。
+
+### 五、附：本轮同时回答的一个技术问题
+
+用户问 `m_pending = std::move(change);`（`m_pending` 为 `std::optional`）是否原子。
+**结论：不是原子的。** 要点：`std::optional` 是普通类模板，移动赋值内部会
+"先析构旧值、再构造新值"，存在**旧值已销毁/新值未构造**的中间态；
+`std::atomic<T>` 不可拷贝/移动，故 `std::optional<std::atomic<T>>` 编译不过；
+`std::atomic<std::optional<T>>` 因 `optional` 非 trivially copyable 也不可用。
+即便单次赋值原子，"**取出并清空**"仍是两步复合操作，需 `mutex`
+或 `std::atomic<std::shared_ptr<T>>` 的 `exchange(nullptr)`。
+（已确认本项目内**没有** `m_pending` 与 `std::optional`，故按通用技术问题回答。）
