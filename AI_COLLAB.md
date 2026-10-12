@@ -3338,3 +3338,79 @@ bash tools/fastdds_sub_diag/scenarios/22_cross_host.sh pub 30 192.168.100.129 20
 * **不是"Windows 侧需要重新开发"**（无需在 Windows 上重建 DDS 依赖链，
   虚拟机本身就是完整的 Linux 环境）—— 因此**没有触发用户设定的停止条件**；
 * **只差用户一步网络配置**，之后跨主机测试即可直接跑通。
+
+---
+
+## 2026-10-12（续 47）| 已启用 WSL mirrored 网络模式（**待测试完成后改回 NAT**）
+
+### 一、用户决策
+
+> 先设置为 mirrored；完成测试后，再改回去。
+
+### 二、已做的改动（只动了一行配置）
+
+* **备份**：`C:\Users\m\.wslconfig` → `C:\Users\m\.wslconfig.bak-before-mirrored`（**原文件完整保留**）；
+* **新增一行**：在 `[wsl2]` 段内加入 `networkingMode=mirrored`；
+* **其余配置一字未动**：`processors=12`、`memory=20GB`、`swap=24GB`、
+  `kernelCommandLine=fs.file-max=1048576 net.core.somaxconn=1024`、
+  `nestedVirtualization=true`、`localhostForwarding=true` 保持原样；
+* **回读验证**：生效的 `networkingMode` 行数为 **1**（没有重复项）。
+
+### 三、版本前提（已核实，满足）
+
+| 项 | 值 | 要求 |
+|---|---|---|
+| WSL 版本 | **2.5.10.0** | ≥ 2.0.0 ✅ |
+| Windows build | **10.0.26200.9457** | ≥ 22621 ✅ |
+| 内核 | 6.6.87.2-1 | — |
+
+**端口预检**（镜像模式下 WSL 与 Windows 共享端口空间）：
+UDP `7400`、`7410`、`9060`、`9061` **当前全部空闲** —— 本项目不会撞端口。
+
+### 四、⏳ 未完成的待办（下次会话第一件事）
+
+1. **改回 NAT**：测试完成后执行
+   ```bash
+   python tools/wsl_netmode.py nat
+   wsl --shutdown
+   ```
+   该工具（`tools/wsl_netmode.py`）已随本次提交入库，支持
+   `status` / `mirrored` / `nat` 三个动作，会先备份、并清理自己插入的托管块，
+   **不会破坏 `.wslconfig` 的其它配置**。
+2. **跑跨主机测试**（见下）。
+
+### 五、重启 WSL 后的验证与测试流程
+
+**第 1 步：确认镜像模式生效**（在 WSL 内）
+```bash
+ip -4 addr show | grep inet
+# 期望：能看到宿主机的 192.168.100.1（而不再是 172.17.211.143）
+```
+
+**第 2 步：确认双向可达**（这是之前卡住的地方）
+```bash
+# 从虚拟机 ping WSL 的新地址 —— 之前 100% 丢包，镜像后应通
+ssh root@192.168.100.129 "ping -c 2 192.168.100.1"
+```
+
+**第 3 步：跑跨主机数据面测试**
+```bash
+# 虚拟机侧（订阅）
+ssh root@192.168.100.129 "cd /reactor/DDSProject && bash tools/fastdds_sub_diag/scenarios/22_cross_host.sh sub 30 192.168.100.1 60"
+# WSL 侧（发布）
+cd /UserData/CodexWorkSpace/Stratum
+bash tools/fastdds_sub_diag/scenarios/22_cross_host.sh pub 30 192.168.100.129 200
+```
+
+**预期**：镜像模式下**组播应当可用**，因此即使不设 `STRATUM_INITIAL_PEERS`
+也可能直接发现；若不通，再显式设置该环境变量（脚本已内建）。
+
+**可能的阻碍（提前预案）**：
+* **Windows 防火墙**在镜像模式下会作用于 WSL，**入站可能被拦** ——
+  需为 UDP `7400`（含 `+d*250`）、`9060`/`9061`（含 `+d*10`）放行；
+* 若 DNS 异常，在 `.wslconfig` 里加 `dnsTunneling=true`。
+
+### 六、提醒（重要）
+
+`wsl --shutdown` **会终止所有 WSL 会话**，本 agent 的 shell 也在其中 ——
+**重启后需要重新开始对话**，届时从本文档第四节"未完成的待办"接着做即可。
