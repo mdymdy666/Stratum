@@ -3492,3 +3492,74 @@ python tools/wsl_netmode.py nat && wsl --shutdown
 * 跨主机测试脚本 `scenarios/22_cross_host.sh` 已入库；
 * **注意**：因 WSL 网络变动，**本轮未能把测试脚本同步到虚拟机**
   （SSH 超时）—— 重启后网络恢复时需补做这一步。
+
+---
+
+## 2026-10-12（续 49）| mirrored 重启后结论：镜像不含 VMware host-only 网卡
+
+### 一、用户已执行 `wsl --shutdown` 并重启，重启后实测
+
+| 检查项 | 结果 |
+|---|---|
+| 接口 | `lo`、**`eth0 10.162.93.33/16`**、`docker0` —— **仍无 `192.168.100.1`** |
+| `192.168.100.0/24` 路由（含所有路由表） | **0 条** |
+| ping 虚拟机 `192.168.100.129` | ❌ **100% 丢包** |
+| SSH 22 端口 | ❌ 不可达 |
+| ping `192.168.100.1` | ✅ 通（实为"自己"，WSL 与 Windows 共享网络栈） |
+| hostname | `DESKTOP-S3JHU55`（已变为宿主机名，符合镜像模式） |
+
+### 二、WSL 常规网络完全健康（排除"配置有问题"的可能）
+
+| 检查项 | 结果 |
+|---|---|
+| 网关 `10.162.255.253` | ✅ 通 |
+| DNS 解析 | ✅ 成功 |
+| 出网 ICMP | ✅ 通 |
+| 出口网卡 | `eth0`（`10.162.93.33`） |
+| 邻居表 | 只有网关与 loopback，**无任何虚拟机痕迹** |
+
+**结论**：`networkingMode=mirrored` **只镜像宿主机连接物理网络的网卡**，
+**不镜像 VMware 的 host-only / VMnet 虚拟网卡**。因此虚拟机所在的
+`192.168.100.0/24` 对 WSL 不可见 —— 镜像模式**解决不了这个拓扑**。
+
+（另外镜像模式下 `wsl2.localhostForwarding` 会失效并给出提示，属预期行为。）
+
+### 三、下一步方案（按推荐度排序）
+
+**方案 A（推荐）：给虚拟机加一块"桥接（Bridged）"网卡**
+
+WSL 现在拥有宿主机的物理网段地址 `10.162.93.33`。只要虚拟机也接到物理网段，
+双方**同网段即可直接互通**，既不需要 portproxy、也不需要额外配置：
+
+1. VMware 里给该虚拟机**添加网络适配器** → 选 **桥接（Bridged）**（或把现有适配器改为桥接）；
+2. 进虚拟机确认拿到 `10.162.x.x` 地址：`ip -4 addr show`；
+3. 回到 WSL 验证：`ping <虚拟机新IP>`；
+4. 之后两端跑 `scenarios/22_cross_host.sh` 即可（脚本的 `<peer_ip>` 参数传新地址）。
+
+> **保留现有 host-only 网卡**更稳妥（不影响虚拟机原有的 `192.168.100.129` 用途）。
+
+**方案 B：Windows 端口转发（需管理员）**
+
+虚拟机可达 `192.168.100.1`（已验证）。把它转发到 WSL：
+
+```powershell
+netsh interface portproxy add v4tov4 listenaddress=192.168.100.1 listenport=9060 connectaddress=10.162.93.33 connectport=9060
+netsh interface portproxy add v4tov4 listenaddress=192.168.100.1 listenport=9061 connectaddress=10.162.93.33 connectport=9061
+```
+
+并让 WSL 侧用 `advertised_address=192.168.100.1` 对外声明
+（否则对端会把数据发到 `10.162.93.33`，跨不过去）。
+
+**方案 C：回滚 mirrored + 走 NAT** —— 但 NAT 下**反向依然不可达**
+（实测过：虚拟机 ping `172.17.211.143` 100% 丢包），**解决不了问题**，不建议。
+
+### 四、当前状态与回滚
+
+* `mirrored` **仍在启用**（`.wslconfig` 里那一行还在，备份在 `.wslconfig.bak-before-mirrored`）；
+  方案 A 与 B **都依赖它**提供的 `10.162.93.33`，所以**先不要回滚**；
+* 全部测试完成后再执行（用户已明确要求测试后改回）：
+  ```bash
+  python tools/wsl_netmode.py nat && wsl --shutdown
+  ```
+* **待补做**：把 `scenarios/22_cross_host.sh` 同步到虚拟机
+  （上一轮因网络中断未完成；网络恢复后补）。
