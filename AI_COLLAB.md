@@ -3815,3 +3815,21 @@ bash tools/fastdds_sub_diag/scenarios/23_cross_host_relay.sh 200
 * 虚拟机：**仅 NAT 网卡**（桥接实验已回滚，备份在 `centos9_2.vmx.bak-before-bridge`）；
 * 产物：`tools/udp_relay.py`（含 `--one-way`）、`scenarios/23_cross_host_relay.sh`、
   `STRATUM_ADVERTISED_ADDRESS` 环境变量入口、`rtps_reader_diag` 的环境变量支持。
+
+### 六、复跑确认可重复（2026-10-12 续 52 附）
+
+| 项目 | 结果 |
+|---|---|
+| 跨主机 200 条 | 收到 **201**（200 + 1 补救副本），PASS |
+| **跨主机 300 条（复跑）** | 已发布 **300**，虚拟机收到 **301**，，，**PASS** |
+| 单机 Usage
+
+  ctest [options] | **33/33** |
+| 单机对账 A / B | **200/200**、**119/119** |
+| 单机大 payload | 21/20、20/20、11/10 |
+
+**跨主机路径可重复**，且对单机功能零影响。
+
+**中继进程**： 仍在后台运行（绑定 ）。
+需要长期复现时按第四节命令重启即可；不需要时关掉该窗口即可，**不影响任何单机功能**。
+
