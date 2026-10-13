@@ -3834,3 +3834,83 @@ bash tools/fastdds_sub_diag/scenarios/23_cross_host_relay.sh 200
 > 记录提示：写这段时我第一次用 bash heredoc，反引号被 shell 当命令执行，
 > 把 `` `ctest` `` 之类替换成了命令输出、弄坏了文档。**改用 Python 写文件**后修复。
 > 教训：文档里含反引号时，不要经 shell heredoc 写入。
+
+---
+
+## 2026-10-13（续 53）| 跨主机复杂场景：多话题通过；**大 payload 失败的根因是 MTU**
+
+### 一、结果总览（`scenarios/24_cross_host_complex.sh`）
+
+| 子场景 | 结果 |
+|---|---|
+| **A. 多话题并发** | ✅ **PASS** — `发现话题 2 个，已订阅 Writer 2 个`，用户回调样本 **161**（两话题合计，零串扰） |
+| **B. 大 payload** | ⚠️ `1200B` **PASS**（收到 21）；`8000B`/`60000B` **FAIL**（收到 0） |
+| **C. 随机（5 轮）** | ⚠️ `payload=0B` 两轮 **PASS**；`payload≥4000B` 三轮 **FAIL** |
+| **D1. 虚拟机录制 WSL 回放** | ✅ **PASS** — WSL 发 150 条，虚拟机录到 **151 条** |
+| **D2. 虚拟机回放到 WSL** | ❌ FAIL — 虚拟机发 151 条，WSL 收到 0（**待查，非 MTU 问题**，因为是小 payload） |
+
+### 二、大 payload 失败的根因：**MTU / IP 分片**（已证实）
+
+不分片探测（`ping -M do`）结果：
+
+| 路径 | ≤1472B | ≥2000B |
+|---|---|---|
+| WSL → 虚拟机 | ✅ 通 | ❌ 不通 |
+| WSL → 中继地址 | ✅ 通（1472B） | ❌ 不通（4000/8000B） |
+| 虚拟机 → WSL（经中继） | ✅ 通（1400B） | ❌ 不通（4000B） |
+
+* 所有链路 **MTU = 1500** → 不分片 UDP 上限 **1472 字节**；
+* 超过即需 **IP 分片**，而**分片在 WSL NAT / VMware NAT / 中继这条路径上不被转发**；
+* **单机为何没事**：loopback 的 MTU 是 65536，60000B 也不需要分片 —— 这解释了
+  "单机全过、跨主机全挂"的差异。
+
+### 三、由此暴露的一个真实缺陷：**1400B ~ 64KiB 的样本跨主机会静默丢失**
+
+* Stratum 对 **>65515B** 的样本有"显式失败"保护（构建期就拒绝）；
+* 但 **1400B ~ 64KiB 之间**的样本会**照常发送、照常计入"已发布"**，
+  跨主机时因分片被丢而**对端一条都收不到** —— 发送端没有任何提示。
+* **这与"不许静默失败"的项目原则冲突**，是本次跨主机测试最有价值的发现之一。
+
+**可能的处置**：
+1. **实现 RTPS `DATA_FRAG`**（应用层分片，每片 ≤ MTU）——
+   这正是该机制存在的意义；此前"已决策不做"，现在**有了明确需求**；
+2. **或**：发送端探测路径 MTU 并对超限样本显式报错（保守，但语义不如 1 完整）；
+3. **或**：文档化限制并提供告警（最低限度，仍优于静默丢失）。
+
+### 四、本轮修掉的脚本问题（都很典型）
+
+1. **`RJ=$(vm_reader ...)` —— 命令替换 fork 子 shell**，
+   在子 shell 里后台启动的 ssh 随子 shell 退出被杀，表现为"收到 0 条"。
+   改用**全局变量传 PID** 后 A/B/C 才有真实数据。
+2. **中继 v1/v2/v3 的演进**：
+   * v1 每方向一个 socket，但**是单向的** —— 源地址被改写后 WSL 学到的
+     locator 是中继地址，其 SEDP 进了错误的 socket（`spdp=200 peers=1 sedp_pub=0`）；
+   * v2 改成单 socket 按来源判方向（思路对），**但复用了绑定的 socket 发送**，
+     Windows 拒绝从 `192.168.100.1` 路由到 WSL 网段（`WinError 10051`）；
+   * **v3 = 单 RX socket（绑定）+ 独立未绑定 TX socket** —— 这条才通。
+3. **D1 未清理录制目录**，回放看到的是上次的残留数据（151 条是旧的）。
+
+### 五、可复现命令
+
+```powershell
+# 1) 确认虚拟机在跑（隔夜/重启后需要用 vmrun 重新启动）
+F:\vmware\vmrun.exe list
+F:\vmware\vmrun.exe start "F:\xvniji\Centos9_1kelong3\centos9_2.vmx" gui
+
+# 2) Windows 侧中继 v3
+python -u E:\CodexWorkspace\LearnFastDDS\tools\udp_relay.py ^
+    --ports 14900,9360,9361 --wsl 172.17.211.143 --guest 192.168.100.129 ^
+    --bind 192.168.100.1
+```
+```bash
+# 3) WSL 侧
+bash tools/fastdds_sub_diag/scenarios/23_cross_host_relay.sh 200   # 基本链路
+bash tools/fastdds_sub_diag/scenarios/24_cross_host_complex.sh 5   # 复杂套件
+```
+
+### 六、遗留
+
+* **D2（虚拟机 → WSL 回放）** 待查：小 payload 本应能过 MTU，但仍收到 0，
+  说明中继回程或匹配还有问题，需要单独定位；
+* **大 payload 跨主机**：结论是**必须实现 `DATA_FRAG`**（或至少显式报错），
+  已作为新的待办写入队列。
