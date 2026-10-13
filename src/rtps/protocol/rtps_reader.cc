@@ -427,6 +427,21 @@ Status RtpsReader::OpenSockets() {
     {
       int rcvbuf = 8 * 1024 * 1024;
       ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+      // 【必须回报实际值】内核会把 SO_RCVBUF 静默截断到 net.core.rmem_max
+      // （实测该值默认仅 212992 = 208KB），高突发下就成了丢包的根因，
+      // 而调用方从返回值看不出来。打印实际生效值，让这类问题当场可见。
+      {
+        int actual = 0;
+        socklen_t alen = sizeof(actual);
+        if (::getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &actual, &alen) == 0 &&
+            actual < rcvbuf) {
+          std::fprintf(stderr,
+                       "[reader] 警告：SO_RCVBUF 请求 %d 字节，实际生效 %d 字节"
+                       "（受 net.core.rmem_max 限制，建议 sysctl -w "
+                       "net.core.rmem_max=67108864）\n", rcvbuf, actual);
+          std::fflush(stderr);
+        }
+      }
       // 组播/单播都要：让内核即使在高突发下也有足够排队空间。
     }
     if (fd < 0) return -1;
@@ -1275,7 +1290,7 @@ void RtpsReader::HandleDataFrag(const uint8_t* buf, size_t n, uint32_t body) {
   uint32_t wid = 0, start = 0, sample_size = 0;
   uint64_t sn = 0;
   uint16_t in_sub = 0, fsz = 0;
-  std::memcpy(&wid, b + 8, 4);
+  wid = EntityVal(b + 8);   // 与 DATA 路径一致（处理 EntityId 的字节序）
   {
     uint32_t hi = 0, lo = 0;
     std::memcpy(&hi, b + 12, 4);
@@ -1360,12 +1375,19 @@ void RtpsReader::HandleDataFrag(const uint8_t* buf, size_t n, uint32_t body) {
     }
   }
 
-  RecordReceivedSn(wid, static_cast<uint32_t>(sn & 0xFFFFFFFFu));
-  st_samples_.fetch_add(1, std::memory_order_relaxed);
+  // 【去重】重传的分片会再次收齐，必须用 SN 去重，否则同一样本会重复交付
+  // （实测：发 20 条 8000B 却收到 56 条）。这与 DATA 路径用的是同一个机制。
+  const bool first_time =
+      RecordReceivedSn(wid, static_cast<uint32_t>(sn & 0xFFFFFFFFu));
 
   frag_bufs_bytes_ -= fb.data.size();
   frag_bufs_.erase(key);
 
+  if (!first_time) {
+    return;   // 已交付过，静默丢弃重复
+  }
+
+  st_samples_.fetch_add(1, std::memory_order_relaxed);
   if (callback_) {
     callback_(ud);
   }

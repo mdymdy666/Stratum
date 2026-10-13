@@ -53,6 +53,34 @@ void FillDefaultGuidPrefix(uint8_t out[12]) {
   std::memcpy(out + 10, &c, 2);
 }
 
+
+// 探测默认路由的 MTU；失败返回 0。
+//
+// 手段：向一个外部地址建一个 UDP "连接"（不发包），再 getsockopt(IP_MTU)。
+// 这是标准做法，不需要 root，也不依赖解析 /proc 或 iproute2。
+int DetectPathMtu(const char* target) {
+  const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0) return 0;
+  sockaddr_in dst{};
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(9);
+  const char* ip = (target != nullptr && target[0] != '\0') ? target : "127.0.0.1";
+  if (::inet_pton(AF_INET, ip, &dst.sin_addr) != 1) {
+    ::close(fd);
+    return 0;
+  }
+  if (::connect(fd, reinterpret_cast<const sockaddr*>(&dst), sizeof(dst)) != 0) {
+    ::close(fd);
+    return 0;
+  }
+  int mtu = 0;
+  socklen_t len = sizeof(mtu);
+  const int rc = ::getsockopt(fd, IPPROTO_IP, IP_MTU, &mtu, &len);
+  ::close(fd);
+  if (rc != 0 || mtu <= 0) return 0;
+  return mtu;
+}
+
 }  // namespace
 
 
@@ -103,6 +131,32 @@ RtpsWriter::~RtpsWriter() { Stop(); }
 Status RtpsWriter::Open(const RtpsWriterConfig& config) {
   if (fd_meta_ >= 0) return Status::InvalidArgument("RtpsWriter 已打开");
   config_ = config;
+
+  // 未显式设置时自动按路径 MTU 推导单报文载荷上限（见配置项注释）。
+  //
+  // 【必须按对端探测】早期实现对固定的外部地址（1.1.1.1）探测，得到的是
+  // 默认路由（如 Wi-Fi 1500）的 MTU，于是**单机 loopback 场景也被强行分片**，
+  // 导致单机大 payload 从 21/20 掉到 5/20（分片在 loopback 上本无必要）。
+  // 正确做法：有 initial_peers 就对第一个对端探测；没有则探测 127.0.0.1，
+  // 拿到的是 loopback 的大 MTU，单机因此不会被分片。
+  if (config_.max_udp_payload == 0 && config_.auto_mtu_detect) {
+    const char* tgt = config_.initial_peers.empty()
+                          ? "127.0.0.1"
+                          : config_.initial_peers.front().c_str();
+    const int mtu = DetectPathMtu(tgt);
+    if (mtu > 0) {
+      const int lim = mtu - 28;              // 扣掉 IP(20) + UDP(8)
+      if (lim > 0) {
+        config_.max_udp_payload = static_cast<uint32_t>(lim);
+        if (std::getenv("STRATUM_DUMP") != nullptr) {
+          std::fprintf(stderr, "[writer] 自动探测路径 MTU=%d -> 单报文上限 %d 字节\n",
+                       mtu, lim);
+          std::fflush(stderr);
+        }
+      }
+    }
+  }
+
 
   if (config_.guid_prefix.size() == 12) {
     std::memcpy(my_prefix_, config_.guid_prefix.data(), 12);
@@ -813,6 +867,36 @@ void RtpsWriter::HandleAcknack(const uint8_t* packet, size_t len,
     const PeerAddress& dst = peer.has_user ? peer.user : peer.meta;
     const sockaddr_in sa = ToSockaddr(dst);
     for (const auto& item : resend) {
+      // 【分片样本重传】没有缓存完整报文，按原始 payload 重新切片发送。
+      if (item.is_fragmented) {
+        pkt::DataPacketParams fp;
+        std::memcpy(fp.prefix, my_prefix_, 12);
+        fp.writer_entity = item.writer_entity;
+        fp.sn = item.sn;
+        fp.payload = item.sample.payload;
+        auto fs = pkt::BuildDataFragPackets(fp, item.frag_payload);
+        if (fs.empty()) {
+          st_send_errors_.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+        // 重传给所有 peer（与普通重传一致：按已学到的 locator）
+        std::vector<Peer> psnap;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          psnap = peers_;
+        }
+        for (const Peer& peer : psnap) {
+          const PeerAddress& dst = peer.has_user ? peer.user : peer.meta;
+          const sockaddr_in psa = ToSockaddr(dst);
+          for (const auto& fpkt : fs) {
+            ::sendto(fd_tx_, fpkt.data(), fpkt.size(), 0,
+                     reinterpret_cast<const sockaddr*>(&psa), sizeof(psa));
+          }
+        }
+        st_frag_packets_.fetch_add(fs.size(), std::memory_order_relaxed);
+        continue;
+      }
+
       ThrottleOrWait(item.packet.size());   // 重传同样受限速约束
       ::sendto(fd_tx_, item.packet.data(), item.packet.size(), 0,
                reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
@@ -1265,7 +1349,27 @@ Status RtpsWriter::Publish(const std::string& topic_name,
       st_frag_samples_.fetch_add(1, std::memory_order_relaxed);
       st_frag_packets_.fetch_add(frags.size(), std::memory_order_relaxed);
       ++sent;
-      return Status::OK();   // 见上：分片样本不入 pending_
+      // 【入队以便重传】但不缓存完整报文（packet 留空），只记录分片参数；
+      // 重传时按 sample.payload 重新切片。这样丢包场景下分片样本也能补发。
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        PendingSample ps;
+        ps.sn = sn;
+        ps.packet.clear();
+        ps.is_fragmented = true;
+        ps.writer_entity = writer_entity;
+        ps.frag_payload =
+            static_cast<uint16_t>(config_.max_udp_payload - kFragOverhead);
+        ps.sample.topic_name = topic_name;
+        ps.sample.type_name = type_name;
+        ps.sample.payload = payload;
+        ps.acked = false;
+        pending_.push_back(std::move(ps));
+        if (pending_.size() > 4096) {
+          pending_.erase(pending_.begin(), pending_.begin() + 1024);
+        }
+      }
+      return Status::OK();
     }
 
     const ssize_t n_sent =

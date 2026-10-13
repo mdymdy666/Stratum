@@ -89,6 +89,18 @@ struct RtpsWriterConfig {
   // 因此默认不限制以保持既有行为；跨主机测试时把它设为 1472。
   uint32_t max_udp_payload = 0;
 
+  // 是否自动探测路径 MTU（默认开）。
+  //
+  // 打开时：若 max_udp_payload 未显式设置（== 0），则用 getsockopt(IP_MTU)
+  // 查询默认路由的 MTU，取 mtu - 28（IP 头 20 + UDP 头 8）作为单报文的
+  // UDP 载荷上限，超出的样本自动走 DATA_FRAG 分片。
+  //
+  // 为什么默认开：MTU 1500 的路径上不分片上限就是 1472 字节，超过依赖
+  // IP 分片，而 IP 分片在 NAT/中继路径上会被丢弃。自动探测让"大 payload
+  // 跨主机"默认就能工作，不必手工设 STRATUM_MAX_UDP_PAYLOAD。
+  // 单机场景（loopback MTU 很大）探测结果也很大，行为与不限制基本一致。
+  bool auto_mtu_detect = true;
+
   uint32_t announce_interval_ms = 200;
   uint32_t heartbeat_interval_ms = 100;
 
@@ -155,6 +167,14 @@ struct PendingSample {
   // （reader 不索要匹配完成前的数据，重发**相同 SN** 无效），
   // 上层据此用**新 SN** 重新发布同一份内容（见 Player 的收尾补救）。
   ::stratum::protocol::ReceivedSample sample;
+
+  // 【分片样本的重传】分片路径不缓存那个可能超过 64KiB 的完整报文
+  // （packet 留空），改为记录"这个样本需要分片"以及分片参数，
+  // 重传时按原始 payload **重新切片**发送。
+  // 这样既保留了重传能力，又不会让 pending_ 里堆积巨型缓冲。
+  bool is_fragmented = false;
+  uint32_t writer_entity = 0;
+  uint16_t frag_payload = 0;      // 每片样本字节数
 };
 
 class RtpsWriter {
