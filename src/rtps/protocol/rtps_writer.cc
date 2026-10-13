@@ -1188,6 +1188,17 @@ Status RtpsWriter::Publish(const std::string& topic_name,
   const uint32_t writer_entity = WriterEntityFor(topic_name, type_name);
   const uint64_t sn = NextSnFor(writer_entity);
   auto packet = BuildDataPacket(sn, payload, source_ts_ns, writer_entity);
+
+  // 【跨主机 MTU 保护】超限即显式失败，不静默丢给网络层（见配置项注释）。
+  if (config_.max_udp_payload > 0 &&
+      packet.size() > static_cast<size_t>(config_.max_udp_payload)) {
+    return Status::InvalidArgument(
+        "样本超过配置的 UDP 载荷上限（报文 " + std::to_string(packet.size()) +
+        " 字节 > 上限 " + std::to_string(config_.max_udp_payload) +
+        " 字节）：MTU 1500 的路径不分片上限为 1472，超出会被路径丢弃、"
+        "对端收不到。需要更大样本请实现 RTPS DATA_FRAG；"
+        "单机回环可将 STRATUM_MAX_UDP_PAYLOAD 设为 0 关闭本检查。");
+  }
   if (packet.empty()) {
     // 报文构造失败（例如样本超过 16 位长度上限）：必须让调用方知道，
     // 而不是"计数为已发布、实际什么都没发"。

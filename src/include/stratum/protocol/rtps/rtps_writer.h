@@ -77,6 +77,18 @@ struct RtpsWriterConfig {
   // 可用环境变量 STRATUM_INITIAL_PEERS 传入（逗号分隔多个地址）。
   std::vector<std::string> initial_peers;
 
+  // UDP 载荷上限（0 = 不限制）。
+  //
+  // 【为什么需要】MTU 1500 的链路上，不分片的 UDP 上限是 1472 字节；
+  // 超过就需要 IP 分片，而**分片在 WSL NAT / VMware NAT / UDP 中继这类路径上
+  // 不会被转发** —— 包发出去就没了，发送端却照常计入"已发布样本"，
+  // 对端一条都收不到（本项目跨主机测试实测到这一点）。
+  // 这属于静默失败，违反项目原则，所以提供这个上限让失败可见。
+  //
+  // 默认 0：单机回环的 MTU 是 65536，大样本（如 60000B）不分片也能过，
+  // 因此默认不限制以保持既有行为；跨主机测试时把它设为 1472。
+  uint32_t max_udp_payload = 0;
+
   uint32_t announce_interval_ms = 200;
   uint32_t heartbeat_interval_ms = 100;
 

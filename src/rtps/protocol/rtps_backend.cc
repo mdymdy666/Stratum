@@ -144,6 +144,9 @@ Status RtpsSink::Open() {
 
   ParseInitialPeersFromEnv(&writer_config_.initial_peers);
   ApplyAdvertisedAddressFromEnv(&writer_config_.advertised_address);
+  if (const char* mv = std::getenv("STRATUM_MAX_UDP_PAYLOAD")) {
+    writer_config_.max_udp_payload = static_cast<uint32_t>(std::atoi(mv));
+  }
   Status s = writer_.Open(writer_config_);
   if (!s.ok()) return s;
   s = writer_.Start();
