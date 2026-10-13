@@ -426,7 +426,18 @@ Status RtpsReader::OpenSockets() {
     // 所以同时建议调大 rmem_max（见 design/15-test-report.md 的说明）。
     {
       int rcvbuf = 8 * 1024 * 1024;
-      ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+      // 优先用 SO_RCVBUFFORCE：有 CAP_NET_ADMIN 时它能**绕过** net.core.rmem_max
+      // 把缓冲真正设到请求值；没有权限时该调用失败，再回退普通 SO_RCVBUF。
+      // 背景：rmem_max 默认仅 212992（208KB），普通 SO_RCVBUF 会被静默截断，
+      // 高突发下直接表现为丢包（实测多 topic 大数据量只送达 87%）。
+      bool forced = false;
+#ifdef SO_RCVBUFFORCE
+      forced = (::setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf,
+                             sizeof(rcvbuf)) == 0);
+#endif
+      if (!forced) {
+        ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+      }
       // 【必须回报实际值】内核会把 SO_RCVBUF 静默截断到 net.core.rmem_max
       // （实测该值默认仅 212992 = 208KB），高突发下就成了丢包的根因，
       // 而调用方从返回值看不出来。打印实际生效值，让这类问题当场可见。
