@@ -175,6 +175,13 @@ struct PendingSample {
   bool is_fragmented = false;
   uint32_t writer_entity = 0;
   uint16_t frag_payload = 0;      // 每片样本字节数
+
+  // 【退避重传】重传不再"收到 ACKNACK 就立刻发"，而是按指数退避排期，
+  // 由心跳周期（默认 100ms）驱动。原因：ACKNACK 只在对端发现缺口时发几次，
+  // 靠它驱动会让重传窗口过窄；且立即重发容易与原始流量叠加造成拥塞。
+  uint32_t resend_count = 0;      // 已重传次数
+  uint64_t next_resend_ms = 0;    // 下次可重传的时刻（steady_clock 毫秒）
+  bool gave_up = false;           // 超过上限，放弃该样本
 };
 
 class RtpsWriter {
@@ -256,6 +263,8 @@ class RtpsWriter {
   std::deque<std::pair<std::chrono::steady_clock::time_point, size_t>> send_log_;
   std::atomic<uint64_t> st_throttle_timeouts_{0};
   std::atomic<uint64_t> st_debug_dropped_{0};
+  std::atomic<uint64_t> st_resend_total_{0};      // 退避重传次数
+  std::atomic<uint64_t> st_resend_gave_up_{0};    // 放弃重传的样本数
   std::atomic<uint64_t> st_frag_samples_{0};   // 走 DATA_FRAG 的样本数
   std::atomic<uint64_t> st_frag_packets_{0};   // DATA_FRAG 报文总数
 
@@ -265,6 +274,8 @@ class RtpsWriter {
   void WaitForSendWindow();
 
   void SendHeartbeats();
+  // 按退避排期发送待重传样本（由心跳周期驱动）
+  void DriveResends();
   void ReannouncePublications();
   void FlushPendingToPeers();
   void HandleSpdp(const uint8_t* packet, size_t len, const sockaddr_in& src);

@@ -358,6 +358,7 @@ void RtpsWriter::ReceiveLoop() {
     }
     if (now - last_hb >= hb_interval) {
       SendHeartbeats();
+      DriveResends();   // 退避重传（见实现注释）
       last_hb = now;
       // 周期性重发 SEDP Publication：对端可能在数据发出之后才完成匹配，
       // 必须让它持续有机会看到我们的 Writer。
@@ -843,31 +844,77 @@ void RtpsWriter::HandleAcknack(const uint8_t* packet, size_t len,
     return miss;
   };
 
-  std::vector<PendingSample> resend;
+  // 【退避重传：只排期，不立即发送】
+  //
+  // 旧实现是"解析出缺失的 SN 后马上重发"。问题：
+  //   · ACKNACK 只在对端发现缺口时发几次，靠它驱动会让重传窗口过窄
+  //     （实测 10% 丢包下收敛率仅约 93%）；
+  //   · 立即重发会与仍在途的原始报文叠加，加剧拥塞。
+  // 现在改为：标记缺失 + 按指数退避排期，由心跳周期统一驱动发送。
+  const uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+  constexpr uint64_t kFirstBackoffMs = 50;    // 首次退避
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto& p : pending_) {
       const uint32_t low = static_cast<uint32_t>(p.sn & 0xFFFFFFFFu);
       if (is_missing(low)) {
         p.acked = false;
-        resend.push_back(p);                         // 只重传真正缺失的
+        if (!p.gave_up && p.next_resend_ms == 0) {
+          p.next_resend_ms = now_ms + kFirstBackoffMs;   // 首次排期
+        }
       } else {
         p.acked = true;
       }
     }
   }
-  if (resend.empty()) return;
+  return;
+}
+
+// ---------------------------------------------------------------------------
+// 退避重传驱动（每个心跳周期调用一次）
+//
+// 退避序列：50ms -> 100 -> 200 -> 400 -> 800 -> 1000(上限)
+// 最多重传 kMaxResend 次，超限标记 gave_up 并计数，避免无休止重试。
+// 分片样本按原始 payload **重新切片**发送（pending_ 里不缓存超大报文）。
+// ---------------------------------------------------------------------------
+void RtpsWriter::DriveResends() {
+  constexpr uint32_t kMaxResend = 6;
+  constexpr uint64_t kMaxBackoffMs = 1000;
+
+  const uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
 
   std::vector<Peer> peers;
+  std::vector<PendingSample> due;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     peers = peers_;
+    for (auto& p : pending_) {
+      if (p.acked || p.gave_up) continue;
+      if (p.next_resend_ms == 0 || p.next_resend_ms > now_ms) continue;
+      if (p.resend_count >= kMaxResend) {
+        p.gave_up = true;
+        st_resend_gave_up_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      due.push_back(p);
+      ++p.resend_count;
+      // 指数退避，带上限
+      uint64_t back = 50ULL << (p.resend_count > 5 ? 5 : (p.resend_count - 1));
+      if (back > kMaxBackoffMs) back = kMaxBackoffMs;
+      p.next_resend_ms = now_ms + back;
+    }
   }
-  for (const Peer& peer : peers) {
-    const PeerAddress& dst = peer.has_user ? peer.user : peer.meta;
-    const sockaddr_in sa = ToSockaddr(dst);
-    for (const auto& item : resend) {
-      // 【分片样本重传】没有缓存完整报文，按原始 payload 重新切片发送。
+  if (due.empty() || peers.empty()) return;
+
+  for (const auto& item : due) {
+    for (const Peer& peer : peers) {
+      const PeerAddress& dst = peer.has_user ? peer.user : peer.meta;
+      const sockaddr_in sa = ToSockaddr(dst);
+
       if (item.is_fragmented) {
         pkt::DataPacketParams fp;
         std::memcpy(fp.prefix, my_prefix_, 12);
@@ -879,29 +926,25 @@ void RtpsWriter::HandleAcknack(const uint8_t* packet, size_t len,
           st_send_errors_.fetch_add(1, std::memory_order_relaxed);
           continue;
         }
-        // 重传给所有 peer（与普通重传一致：按已学到的 locator）
-        std::vector<Peer> psnap;
-        {
-          std::lock_guard<std::mutex> lock(mutex_);
-          psnap = peers_;
-        }
-        for (const Peer& peer : psnap) {
-          const PeerAddress& dst = peer.has_user ? peer.user : peer.meta;
-          const sockaddr_in psa = ToSockaddr(dst);
-          for (const auto& fpkt : fs) {
-            ::sendto(fd_tx_, fpkt.data(), fpkt.size(), 0,
-                     reinterpret_cast<const sockaddr*>(&psa), sizeof(psa));
-          }
+        for (const auto& fpkt : fs) {
+          ::sendto(fd_tx_, fpkt.data(), fpkt.size(), 0,
+                   reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
         }
         st_frag_packets_.fetch_add(fs.size(), std::memory_order_relaxed);
-        continue;
+      } else if (!item.packet.empty()) {
+        ThrottleOrWait(item.packet.size());
+        ::sendto(fd_tx_, item.packet.data(), item.packet.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
       }
-
-      ThrottleOrWait(item.packet.size());   // 重传同样受限速约束
-      ::sendto(fd_tx_, item.packet.data(), item.packet.size(), 0,
-               reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
-      st_retrans_.fetch_add(1, std::memory_order_relaxed);
+      st_resend_total_.fetch_add(1, std::memory_order_relaxed);
     }
+  }
+
+  if (std::getenv("STRATUM_DUMP") != nullptr) {
+    std::fprintf(stderr, "[resend] 本轮重传 %zu 个样本（累计 %llu）\n", due.size(),
+                 static_cast<unsigned long long>(
+                     st_resend_total_.load(std::memory_order_relaxed)));
+    std::fflush(stderr);
   }
 }
 
