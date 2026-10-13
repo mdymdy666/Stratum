@@ -24,7 +24,7 @@ ROOT="$(cd "$DIR/../../.." && pwd)"
 TOOLS="$ROOT/build/tools"
 LOGS="$TOOLS/logs"
 HW_BIN="${HW_BIN:-/UserData/Fast-DDS/build-fastdds/examples/cpp/hello_world/hello_world}"
-DOMAIN="${DOMAIN:-0}"
+DOMAIN="${DOMAIN:-40}"   # 避开 ROS 2 占用的 domain 0（见下方说明）
 RATE="${RATE:-5.0}"
 COUNT="${COUNT:-200}"
 
@@ -44,39 +44,45 @@ analyze() {
     ' "$1.idx"
 }
 
-echo "########## A. 生成 $COUNT 条 → 回放 → 上游 subscriber ##########"
+echo "########## A. 生成 $COUNT 条 → 回放 → 订阅端（domain $DOMAIN）##########"
+# 【时序照抄已验证的手工方案】
+#   · 订阅端先起，等 6 秒再回放（4 秒时偶尔来不及完成发现）；
+#   · 订阅端跑固定秒数后**自然结束** —— 绝不能用 kill，
+#     否则只在正常退出时打印的 DIAG_SUMMARY 拿不到，判据永远是 0
+#     （这正是此前多轮"收到 0"的真正原因）。
 TLA="$TOOLS/tl_$COUNT"
 rm -rf "$TLA"
 "$TOOLS/make_timeline" "$TLA" "$COUNT" > "$LOGS/08_a_gen.log" 2>&1
-timeout 60 "$HW_BIN" subscriber -s 0 > "$LOGS/08_a_sub.log" 2>&1 &
+timeout 70 "$TOOLS/fastdds_sub_diag" 40 "$DOMAIN" hello_world_topic \
+    > "$LOGS/08_a_sub.log" 2>&1 &
 SUB=$!
-sleep 4
+sleep 6
 timeout 90 "$TOOLS/stratum_rtps_replay" "$TLA" "$DOMAIN" "$RATE" > "$LOGS/08_a_rep.log" 2>&1
-sleep 4
-kill "$SUB" 2>/dev/null; wait "$SUB" 2>/dev/null
 echo "  回放端: $(grep -a '已发布样本' "$LOGS/08_a_rep.log" | head -1 | tr -d ' ')"
-analyze "$LOGS/08_a_sub.log"
+wait "$SUB" 2>/dev/null
+got_a=$(grep -a "DIAG_SUMMARY" "$LOGS/08_a_sub.log" | grep -o "samples=[0-9]*" | head -1 | cut -d= -f2)
+echo "  收到 = ${got_a:-0}（期望 $COUNT）"
 
-echo
-echo "########## B. 真实录制 → 回放 → 上游 subscriber ##########"
+echo "########## B. 真实录制 → 回放 → 订阅端（domain $DOMAIN）##########"
 TLB="$TOOLS/tl_account"
 rm -rf "$TLB"
-"$HW_BIN" publisher -s 0 > "$LOGS/08_b_pub.log" 2>&1 &
+"$TOOLS/fastdds_pub_diag" --domain="$DOMAIN" --topic=hello_world_topic \
+    --count=200 --rate=20 > "$LOGS/08_b_pub.log" 2>&1 &
 PUB=$!
-sleep 3
+sleep 5
 timeout 40 "$TOOLS/stratum_rtps_record" 12 "$DOMAIN" "$TLB" > "$LOGS/08_b_rec.log" 2>&1
 kill "$PUB" 2>/dev/null; wait "$PUB" 2>/dev/null
 grep -a "hello_world_topic " "$LOGS/08_b_rec.log" | head -1 | sed 's/^/  录制: /'
 grep -a "序号缺口" "$LOGS/08_b_rec.log" | head -1 | sed 's/^/  /'
 
 sleep 3
-timeout 90 "$HW_BIN" subscriber -s 0 > "$LOGS/08_b_sub.log" 2>&1 &
+timeout 95 "$TOOLS/fastdds_sub_diag" 55 "$DOMAIN" hello_world_topic \
+    > "$LOGS/08_b_sub.log" 2>&1 &
 SUB2=$!
-sleep 5
+sleep 6
 timeout 90 "$TOOLS/stratum_rtps_replay" "$TLB" "$DOMAIN" "$RATE" > "$LOGS/08_b_rep.log" 2>&1
-sleep 4
-kill "$SUB2" 2>/dev/null; wait "$SUB2" 2>/dev/null
 echo "  回放端: $(grep -a '已发布样本' "$LOGS/08_b_rep.log" | head -1 | tr -d ' ')"
-analyze "$LOGS/08_b_sub.log"
-echo
-echo "日志目录：$LOGS"
+wait "$SUB2" 2>/dev/null
+got_b=$(grep -a "DIAG_SUMMARY" "$LOGS/08_b_sub.log" | grep -o "samples=[0-9]*" | head -1 | cut -d= -f2)
+echo "  订阅端 RECEIVED = ${got_b:-0}"
+
