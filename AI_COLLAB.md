@@ -4095,3 +4095,73 @@ WSL 内正在运行 **ROS 2 + Gazebo**（`gz-sim-main` 占 52% CPU、`parameter_
 1. **跑单机基线前**：确认 domain 0 无 ROS 2 在跑（`pgrep -a ros2`），否则对账 B 不可信；
 2. **DATA_FRAG 继续时**：先做**分片报文的字节级验证**（对照 RTPS 2.3 逐字段核对），
    通过后再接进 `Publish` —— 不要靠端到端现象反推格式是否正确。
+
+---
+
+## 2026-10-13（续 56）| domain 40 方案**已手工验证可行**（200/200）；脚本化待完善
+
+### 一、确凿的成功：手工验证 200/200
+
+在 **ROS 2 照常运行**（占 domain 0）的情况下，手工在 **domain 40** 上跑：
+
+```bash
+# 订阅端（自研工具，自然跑满 40 秒）
+timeout 60 build/tools/fastdds_sub_diag 40 40 hello_world_topic &
+sleep 6
+# 回放端
+build/tools/stratum_rtps_replay <tl_200> 40 5.0
+```
+
+结果：
+
+```
+DIAG_SUMMARY seconds=40 domain=40 topic="hello_world_topic" readers=1
+  participants_discovered=1 writers_discovered=1 matched_events=1
+  samples=200 data_available_calls=201 invalid_data_samples=1
+```
+
+**samples = 200，完全正确** ✅ —— 证明：
+
+1. **domain 40 确实避开了 ROS 2 的干扰**（此前 domain 0 只有 7~17 条）；
+2. **自研工具 `fastdds_sub_diag` + `stratum_rtps_replay` 在非零 domain 上完全正常**；
+3. **此前所有"收到 0"都是判据问题**：脚本用 `kill` 结束订阅进程，
+   `DIAG_SUMMARY` 从未打印，判据自然读不到 0 以外的值。
+
+### 二、脚本化仍未成功（如实记录）
+
+把上述方案落进 `08_accounting.sh`（domain 40 + 自研工具 + 自然结束 + `DIAG_SUMMARY` 判据）后，
+脚本里 A/B 段仍报"收到 0"，而**同一轮 B 段的录制却恢复到 197 条**（证明 domain 40 生效）。
+A 段与手工验证的差异尚未定位（时序：脚本 `sleep 4` vs 手工 `sleep 6`；以及
+`wait`/`timeout` 的交互）。
+
+**处理**：`git checkout` **回退 `08_accounting.sh`**，保持"已知可用"的版本。
+**不把未验证通过的改动留在仓库** —— 与本轮 DATA_FRAG 的处理一致。
+
+### 三、明确的下一步（下次照做即可）
+
+1. **把 08 挪到 domain 40 时，直接照抄手工验证的时序**：
+   `sleep 6`（不是 4）、订阅端时长 40 秒、**绝不用 `kill` 结束订阅进程**（要让它自然退出）；
+2. 若仍不行，就在脚本里**打印订阅端日志尾部**以便当场定位，而不是只看判据数字。
+
+### 四、本轮累计
+
+| 项 | 状态 |
+|---|---|
+| `packet::BuildDataFragPackets` | ✅ 已实现、编译通过、未启用 |
+| DATA_FRAG 接线 | ❌ 未通过 → 已回退 |
+| MTU 显式失败 | ✅ 生效 |
+| `ctest` | ✅ 33/33 |
+| 对账 A | ✅ 200/200 |
+| 对账 B | ⚠️ 在 domain 0 上受 ROS 2 干扰；**domain 40 已手工验证 200/200** |
+| 08 脚本 | ✅ 已回退到已知可用版本 |
+| 工作区 | ✅ 干净 |
+
+### 五、方法论收获（本轮最值钱的部分）
+
+我连续多轮"改 → 判据报 0 → 怀疑实现 → 回退"，真正的根因是**判据本身不可靠**：
+* 用 `kill` 结束进程 → 依赖自然结束才打印的汇总行永远拿不到；
+* 拿"猜测的字符串"（`数据 #`、`RECEIVED`）去 grep → 三次都没猜中；
+* 直到**手工跑一次并直接读汇总行**，才在 1 分钟内看到真相。
+
+**结论**：**当"实现看起来没生效"时，先怀疑判据/观测手段，并且要直接看到原始输出**，
+而不是继续在实现侧来回改。（这也是本项目 `docs/README.md` 第 7 条排查纪律的又一次印证。）
