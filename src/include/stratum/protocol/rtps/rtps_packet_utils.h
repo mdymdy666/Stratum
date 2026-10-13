@@ -58,6 +58,7 @@ constexpr uint8_t kSubGap = 0x08;
 constexpr uint8_t kSubInfoTs = 0x09;
 constexpr uint8_t kSubInfoDst = 0x0e;
 constexpr uint8_t kSubData = 0x15;
+constexpr uint8_t kSubDataFrag = 0x16;   // DATA_FRAG（分片）
 
 // --- QoS PID（ParameterTypes.hpp 中没有对应的 ParameterXxx_t 类，
 //     故按线上格式直接写 PID + length + value）---
@@ -177,6 +178,19 @@ struct DataPacketParams {
 };
 
 std::vector<uint8_t> BuildDataPacket(const DataPacketParams& p);
+
+// 【DATA_FRAG】把一个大样本切成多片，每片一个独立的 DATA_FRAG 子消息报文。
+//
+// 为什么需要：RTPS 的 DATA 子消息只能装 ~64KiB，而且即便装得下，
+// MTU 1500 的链路上不分片上限只有 1472 字节，超出就要靠 IP 分片 ——
+// 而 IP 分片在 NAT/中继路径上会被丢弃（本项目跨主机实测）。
+// DATA_FRAG 把切分放到 RTPS 层，每个报文都不超过 MTU，因此能穿过这类路径。
+//
+// 所有分片共用同一个 writerSN；接收端按 (writer, SN) 缓存并重组。
+// fragment_size 取"单报文可用的最大负载"，调用方应保证
+// fragment_size + 头部开销 <= 路径 MTU。
+std::vector<std::vector<uint8_t>> BuildDataFragPackets(
+    const DataPacketParams& p, uint16_t fragment_size);
 
 }  // namespace packet
 }  // namespace rtps

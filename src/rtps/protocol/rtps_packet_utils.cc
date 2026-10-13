@@ -407,6 +407,83 @@ std::vector<uint8_t> BuildDataPacket(const DataPacketParams& p) {
   return std::vector<uint8_t>(msg.buffer, msg.buffer + msg.length);
 }
 
+// ---------------------------------------------------------------------------
+// DATA_FRAG（分片发送）
+//
+// 子消息布局（RTPS 2.3 §9.6.3.6）：
+//   SubmessageHeader(4: id=0x16, flags, octetsToNextHeader)
+//   extraFlags(2) octetsToInlineQos(2) readerId(4) writerId(4) writerSN(8)
+//   fragmentStartingNum(4) fragmentsInSubmessage(2) fragmentSize(2) sampleSize(4)
+//   serializedPayload
+//
+// octetsToInlineQos 自 extraFlags 之后算到 inlineQos：DATA 是 16，
+// DATA_FRAG 多出 4+2+2+4 = 12 个分片字段，所以是 28。
+//
+// 为什么需要：DATA 子消息除了 64KiB 的长度上限，在 MTU 1500 的链路上还有
+// 1472 字节的不分片上限，超出就依赖 IP 分片，而 IP 分片在 NAT/中继路径上
+// 会被丢弃（本项目跨主机实测）。DATA_FRAG 把切分放在 RTPS 层，
+// 每个报文都不超过 MTU，才能穿过这类路径。
+// ---------------------------------------------------------------------------
+std::vector<std::vector<uint8_t>> BuildDataFragPackets(
+    const DataPacketParams& p, uint16_t fragment_size) {
+  std::vector<std::vector<uint8_t>> out;
+  const size_t total = p.payload.size();
+  if (fragment_size == 0 || total == 0) {
+    return out;
+  }
+
+  size_t per = fragment_size;
+  if (per > total) {
+    per = total;
+  }
+  const uint32_t nfrags = static_cast<uint32_t>((total + per - 1) / per);
+  if (nfrags == 0) {
+    return out;
+  }
+
+  for (uint32_t i = 0; i < nfrags; ++i) {
+    const size_t off = static_cast<size_t>(i) * per;
+    const size_t len = (off + per <= total) ? per : (total - off);
+
+    const uint32_t cap = static_cast<uint32_t>(len) + 512;
+    CDRMessage_t msg(cap);
+    msg.msg_endian = LITTLEEND;
+    WriteHeaderAndDst(&msg, p.prefix, nullptr);
+
+    CDRMessage::addOctet(&msg, kSubDataFrag);
+    CDRMessage::addOctet(&msg, 0x05);          // flags：与 DATA 保持一致
+    const uint32_t size_pos = msg.pos;
+    CDRMessage::addUInt16(&msg, 0);            // octetsToNextHeader 占位
+    const uint32_t body_start = msg.pos;
+
+    CDRMessage::addUInt16(&msg, 0);            // extraFlags
+    CDRMessage::addUInt16(&msg, 28);           // octetsToInlineQos（DATA_FRAG=28）
+    EntityId_t unknown(ENTITYID_UNKNOWN);
+    CDRMessage::addEntityId(&msg, &unknown);   // readerId
+    EntityId_t w(p.writer_entity);
+    CDRMessage::addEntityId(&msg, &w);         // writerId
+    SequenceNumber_t seq(static_cast<int32_t>(p.sn >> 32),
+                         static_cast<uint32_t>(p.sn & 0xFFFFFFFF));
+    CDRMessage::addSequenceNumber(&msg, &seq);
+    CDRMessage::addUInt32(&msg, i + 1);        // fragmentStartingNum（从 1 起）
+    CDRMessage::addUInt16(&msg, 1);            // fragmentsInSubmessage
+    CDRMessage::addUInt16(&msg, static_cast<uint16_t>(per));   // fragmentSize
+    CDRMessage::addUInt32(&msg, static_cast<uint32_t>(total)); // sampleSize
+
+    if (!CDRMessage::addData(&msg,
+                             reinterpret_cast<const octet*>(p.payload.data() + off),
+                             static_cast<uint32_t>(len))) {
+      std::fprintf(stderr, "[packet] DATA_FRAG addData 失败: off=%zu len=%zu cap=%u\n",
+                   off, len, cap);
+      std::fflush(stderr);
+      return {};
+    }
+    BackfillSubmessageLength(&msg, size_pos, body_start);
+    out.push_back(std::vector<uint8_t>(msg.buffer, msg.buffer + msg.length));
+  }
+  return out;
+}
+
 }  // namespace packet
 }  // namespace rtps
 }  // namespace protocol

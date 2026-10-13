@@ -3963,3 +3963,80 @@ D2 恰好是唯一必须过中继的方向，因此只有它暴露了这个问�
 **意义**：把"跨主机大样本静默丢失"变成了**可见的、带原因的失败**，
 符合项目"不许静默失败"的原则。**根本解法仍是实现 RTPS `DATA_FRAG`**，
 那是让大样本跨主机真正可用的唯一途径。
+
+---
+
+## 2026-10-13（续 54）| DATA_FRAG 发送侧：分片构造器已完成，接线未通过、已回退
+
+### 一、本轮成果
+
+| 项 | 状态 |
+|---|---|
+| `packet::BuildDataFragPackets(...)` | ✅ **已实现并编译通过**（按 RTPS 2.3 §9.6.3.6 构造分片：`fragmentStartingNum`/`fragmentsInSubmessage`/`fragmentSize`/`sampleSize`，`octetsToInlineQos` 用 **28**） |
+| `kSubDataFrag = 0x16` 常量 | ✅ |
+| **接线进 `Publish`** | ❌ **未通过，已回退**（见下） |
+| `ctest` | ✅ **33/33**（回退后复测） |
+| 大 payload 单机 | ✅ 21/20、21/20、11/10 |
+| MTU 显式失败 | ✅ 仍生效（8072B > 1472 时明确报错） |
+
+**决定**：`BuildDataFragPackets` 作为**未启用的基础设施保留**（编译通过、无调用者、不影响行为）；
+**接线不在代码里留半成品**，已 `git checkout` 回退 `rtps_writer.cc`。
+
+### 二、接线为什么没通过
+
+把分片发送接进 `Publish` 后，用 `STRATUM_MAX_UDP_PAYLOAD=1472` 回放 8000B 样本，
+Fast DDS 订阅端表现为：
+
+```
+writers_discovered=1  matched_now=0  matched_events=1  unmatched_events=1
+writers_removed=1     samples=0
+```
+
+即**匹配建立后又被取消**、`已发布样本 = 0`、Player 在 0.016 秒就退出
+（说明所有 `Publish` 都失败了）。分片报文本身尚未被验证。
+
+**未定位的原因**（下次继续）：
+* 分片发送位置/`continue` 与 peer 循环、`pending_` 入队、`sent` 计数之间的交互；
+* `Publish` 的返回路径是否影响了 `Player` 的发送循环与 SEDP 重发时序；
+* 也可能是 `BuildDataFragPackets` 自身构造有问题（尚未用抓包单独验证过）。
+
+**下次的正确做法**：先用 `capture_udp` 或字节级单测**单独验证分片报文的格式**
+（对照 RTPS 规范逐字段核对），再接线 —— 而不是直接接进主流程靠端到端现象反推。
+
+### 三、过程中的教训（第三次同类）
+
+我连续三轮用"文本查找 + 大块替换"改 `Publish`，每次都因为**多行结构/缩进/作用域**出错：
+* 第一次把 `if (packet.empty())` 检查误删；
+* 第二次块插在 `sa`/`sent` 定义之前，编译报未声明；
+* 第三次才搞清"主发送在 `for (const Peer& peer : peers)` 循环内、`sa` 是循环内局部变量"。
+
+**教训**：改动前先读清楚**上下文结构与作用域**（`grep -B/-A` 看周围，或先 `git show` 看原状），
+不要拿多行文本硬替换。这与我此前踩过的"用 `find(");")` 改多行调用"是同一类错误。
+
+### 四、对账 B 异常的根因（**与本次改动无关**，已查明）
+
+回退后复跑 `08_accounting.sh`，**对账 B 从 118~119 掉到 7~17 条**（`首=1 尾=22~29`，有 SN 缺口），
+而对账 A 始终 200/200。停掉中继后依旧，故**不是中继**。
+
+查 WSL 侧负载：
+
+| 进程 | CPU |
+|---|---|
+| `gz-sim-main`（Gazebo 仿真） | **52%** |
+| `cpptools` | 25% |
+| `parameter_bridg`（ROS 2） | **21.5%** |
+| `ros2` | 5% |
+
+**根因**：**WSL 里正在跑 ROS 2 + Gazebo**，而对账 B 用的正是 **domain 0** ——
+ROS 2 同样在 domain 0，二者**互相干扰**，同时 CPU 竞争导致录制丢数据。
+虚拟机侧反而空闲（load 0.00）。
+
+**结论**：这是**环境干扰**，与代码改动无关。
+**做法**：跑单机基线前应先确认 domain 0 上没有 ROS 2 在跑，或把基线脚本改用独立 domain
+（已有场景用 7/8/9/12/13/30 等）。
+
+### 五、当前状态
+
+* 代码：`BuildDataFragPackets` 已入库（未启用）；`Publish` 已回退到 HEAD；
+* 基线：`ctest` 33/33 ✅；大 payload ✅；MTU 保护 ✅；**对账 B 受 ROS 占用 domain 0 影响** ⚠️；
+* 中继已停止；虚拟机在线且空闲。

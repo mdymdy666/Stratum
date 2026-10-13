@@ -236,6 +236,8 @@ class RtpsWriter {
   std::deque<std::pair<std::chrono::steady_clock::time_point, size_t>> send_log_;
   std::atomic<uint64_t> st_throttle_timeouts_{0};
   std::atomic<uint64_t> st_debug_dropped_{0};
+  std::atomic<uint64_t> st_frag_samples_{0};   // 走 DATA_FRAG 的样本数
+  std::atomic<uint64_t> st_frag_packets_{0};   // DATA_FRAG 报文总数
 
    // 调试丢包注入实际丢弃的条数
 
