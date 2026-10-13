@@ -102,7 +102,7 @@ F:\vmware\vmrun.exe start "F:\xvniji\Centos9_1kelong3\centos9_2.vmx" gui
 
 ```powershell
 python -u E:\CodexWorkspace\LearnFastDDS\tools\udp_relay.py ^
-    --ports 14900,9360,9361 ^
+    --ports 14900,9350,9351 ^
     --wsl <WSL的IP> --guest 192.168.100.129 ^
     --bind 192.168.100.1
 ```
@@ -112,8 +112,8 @@ python -u E:\CodexWorkspace\LearnFastDDS\tools\udp_relay.py ^
 | 用途 | 端口公式 | domain 30 |
 |---|---|---|
 | SPDP | `7400 + d*250` | **14900** |
-| metatraffic | `9060 + d*10` | **9360** |
-| user data | `9061 + d*10` | **9361** |
+| metatraffic | `9050 + d*10` | **9350** |
+| user data | `9051 + d*10` | **9351** |
 
 **第三步：两侧声明地址**（用环境变量，不改代码）
 

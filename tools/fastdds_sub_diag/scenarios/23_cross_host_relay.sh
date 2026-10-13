@@ -21,11 +21,11 @@ N="${1:-200}"
 DOMAIN="${DOMAIN:-30}"
 # RTPS 端口（随 domain 偏移，中继必须同时转发 SPDP 端口，否则永远发现不了彼此）：
 #   SPDP        = 7400 + d*250  -> domain 30 = 14900
-#   metatraffic = 9060 + d*10   -> domain 30 = 9360
-#   user data   = 9061 + d*10   -> domain 30 = 9361
+#   metatraffic = 9050 + d*10   -> domain 30 = 9350
+#   user data   = 9051 + d*10   -> domain 30 = 9351
 SPDP_PORT=$((7400 + DOMAIN * 250))
-META_PORT=$((9060 + DOMAIN * 10))
-USER_PORT=$((9061 + DOMAIN * 10))
+META_PORT=$((9050 + DOMAIN * 10))
+USER_PORT=$((9051 + DOMAIN * 10))
 VM=192.168.100.129
 # 地址关系（实测确认）：
 #   · 192.168.100.129 = 虚拟机自身

@@ -29,7 +29,7 @@ Topology (measured):
 
 Usage (Windows, plain user, no admin needed):
 
-    python -u tools/udp_relay.py --ports 14900,9360,9361 ^
+    python -u tools/udp_relay.py --ports 14900,9350,9351 ^
         --wsl 172.17.211.143 --guest 192.168.100.129 --bind 192.168.100.1
 """
 import argparse

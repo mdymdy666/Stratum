@@ -9,7 +9,7 @@
 #   D. 实时回访闭环     —— WSL 回放 -> 虚拟机录制 -> 虚拟机回放 -> WSL 接收
 #
 # 前置：Windows 侧中继在跑
-#   python -u tools/udp_relay.py --ports 14900,9360,9361 \
+#   python -u tools/udp_relay.py --ports 14900,9350,9351 \
 #       --wsl <WSL_IP> --guest 192.168.100.129 --wsl-gw 192.168.100.1 --one-way
 #
 # 用法：bash tools/fastdds_sub_diag/scenarios/24_cross_host_complex.sh [轮数]
@@ -24,8 +24,8 @@ WSL_ADV=192.168.100.1         # WSL 声明地址（虚拟机发到这里，中�
 VM_DIR=/reactor/DDSProject
 
 SPDP_PORT=$((7400 + DOMAIN * 250))
-META_PORT=$((9060 + DOMAIN * 10))
-USER_PORT=$((9061 + DOMAIN * 10))
+META_PORT=$((9050 + DOMAIN * 10))
+USER_PORT=$((9051 + DOMAIN * 10))
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../../.." && pwd)"
