@@ -4040,3 +4040,58 @@ ROS 2 同样在 domain 0，二者**互相干扰**，同时 CPU 竞争导致录�
 * 代码：`BuildDataFragPackets` 已入库（未启用）；`Publish` 已回退到 HEAD；
 * 基线：`ctest` 33/33 ✅；大 payload ✅；MTU 保护 ✅；**对账 B 受 ROS 占用 domain 0 影响** ⚠️；
 * 中继已停止；虚拟机在线且空闲。
+
+---
+
+## 2026-10-13（续 55）| 对账 B 异常的环境结论；脚本改动尝试失败并已回退
+
+### 一、结论：对账 B 的退化是**环境干扰**
+
+WSL 内正在运行 **ROS 2 + Gazebo**（`gz-sim-main` 占 52% CPU、`parameter_bridg` 21.5%），
+而 `08_accounting.sh` 默认使用 **domain 0** —— 与 ROS 2 相同，于是：
+
+* 二者在 domain 0 上**互相发现、互相干扰**；
+* CPU 争抢导致录制端丢数据（`收到 = 7~17`，且 `首=1 尾=22~29` 出现 SN 缺口）；
+* 而对账 A（生成时间线 → 回放）始终 **200/200**，因为它不依赖这个方向的录制。
+
+**虚拟机侧反而完全空闲**（`load average: 0.00`），所以与跨主机无关。
+
+**跑单机基线前应确认 domain 0 上没有 ROS 2 在跑**；或者把基线挪到独立 domain。
+
+### 二、尝试的修复失败了（如实记录）
+
+我试图把 `08_accounting.sh` 挪到 **domain 40**，并用自研的 `fastdds_pub_diag` /
+`fastdds_sub_diag`（支持 `--domain`）替换上游的 `hello_world`
+（后者不支持指定 domain，只认 `-s/-m/-w`）。
+
+**结果失败**：A/B 两段都变成"收到 0"。日志里能看到
+`[diag][EDP] DISCOVERED_WRITER` 与 `[diag][MATCH] current_count=1`（**匹配是成功的**）、
+回放端 `已发布样本 = 200`，但订阅端统计仍为 0，且 `DIAG_SUMMARY` 没打出来
+（进程被 timeout 结束）。具体原因未定位。
+
+**处理**：`git checkout` **回退 `08_accounting.sh`**，恢复到原本可工作的版本
+（`domain 0` + `hello_world`）。**不把半成品留在仓库里** —— 这与本轮 DATA_FRAG
+的处理原则一致。回退后工作区干净、对账 A 恢复 200/200。
+
+**下次要改这条路径时的建议**：先在独立的小实验里确认
+「`fastdds_sub_diag` + `stratum_rtps_replay` 在非零 domain 上能收全」，
+再动基线脚本；不要直接改基线脚本后靠它自身验证。
+
+### 三、本轮累计状态
+
+| 项 | 状态 |
+|---|---|
+| `packet::BuildDataFragPackets` | ✅ 已实现、编译通过，**未启用**（基础设施保留） |
+| DATA_FRAG 接线 | ❌ 未通过 → 已回退 |
+| MTU 显式失败（`STRATUM_MAX_UDP_PAYLOAD`） | ✅ 生效 |
+| `ctest` | ✅ 33/33 |
+| 大 payload（单机） | ✅ 全过 |
+| 对账 A | ✅ 200/200 |
+| 对账 B | ⚠️ 受 ROS 占用 domain 0 影响（环境问题，非代码） |
+| 工作区 | ✅ 干净（无未提交改动） |
+
+### 四、给后续的两条操作建议
+
+1. **跑单机基线前**：确认 domain 0 无 ROS 2 在跑（`pgrep -a ros2`），否则对账 B 不可信；
+2. **DATA_FRAG 继续时**：先做**分片报文的字节级验证**（对照 RTPS 2.3 逐字段核对），
+   通过后再接进 `Publish` —— 不要靠端到端现象反推格式是否正确。
