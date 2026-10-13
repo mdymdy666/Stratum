@@ -1189,16 +1189,6 @@ Status RtpsWriter::Publish(const std::string& topic_name,
   const uint64_t sn = NextSnFor(writer_entity);
   auto packet = BuildDataPacket(sn, payload, source_ts_ns, writer_entity);
 
-  // 【跨主机 MTU 保护】超限即显式失败，不静默丢给网络层（见配置项注释）。
-  if (config_.max_udp_payload > 0 &&
-      packet.size() > static_cast<size_t>(config_.max_udp_payload)) {
-    return Status::InvalidArgument(
-        "样本超过配置的 UDP 载荷上限（报文 " + std::to_string(packet.size()) +
-        " 字节 > 上限 " + std::to_string(config_.max_udp_payload) +
-        " 字节）：MTU 1500 的路径不分片上限为 1472，超出会被路径丢弃、"
-        "对端收不到。需要更大样本请实现 RTPS DATA_FRAG；"
-        "单机回环可将 STRATUM_MAX_UDP_PAYLOAD 设为 0 关闭本检查。");
-  }
   if (packet.empty()) {
     // 报文构造失败（例如样本超过 16 位长度上限）：必须让调用方知道，
     // 而不是"计数为已发布、实际什么都没发"。
@@ -1232,6 +1222,52 @@ Status RtpsWriter::Publish(const std::string& topic_name,
       std::putc(10, stderr);
       std::fflush(stderr);
     }
+    // 【跨主机 MTU】样本超过配置上限时改发 DATA_FRAG 分片。
+    //
+    // 分片报文已由 tests/manual/test_data_frag.cc 做过**字节级验证**
+    // （id=0x16、octetsToInlineQos=28、fragmentStartingNum 递增、
+    //  fragmentSize/sampleSize 正确、每片不超过 MTU 上限）。
+    //
+    // 【为什么这里必须提前返回】分片路径不发那个"整包" packet，因此**不能**
+    // 走后面的 pending_ 入队逻辑 —— 否则重传时会从一个超过 64KiB 的
+    // 完整报文里取数据，不但无意义，还可能触发 DATA 的长度上限。
+    // 代价是分片样本暂时没有重传能力（可靠传输层面后续再补）。
+    constexpr size_t kFragOverhead = 56;   // RTPS头20 + 子消息头4 + 固定字段32
+    if (config_.max_udp_payload > kFragOverhead &&
+        packet.size() > config_.max_udp_payload) {
+      pkt::DataPacketParams fp;
+      std::memcpy(fp.prefix, my_prefix_, 12);
+      fp.writer_entity = writer_entity;
+      fp.sn = sn;
+      fp.payload = payload;
+      auto frags = pkt::BuildDataFragPackets(
+          fp, static_cast<uint16_t>(config_.max_udp_payload - kFragOverhead));
+      if (frags.empty()) {
+        st_pub_build_failed_.fetch_add(1, std::memory_order_relaxed);
+        return Status::InvalidArgument(
+            "样本需要分片但构造 DATA_FRAG 失败（payload=" +
+            std::to_string(payload.size()) + " 字节）");
+      }
+      size_t ok = 0;
+      for (const auto& fpkt : frags) {
+        const ssize_t fn = ::sendto(fd_tx_, fpkt.data(), fpkt.size(), 0,
+                                    reinterpret_cast<const sockaddr*>(&sa),
+                                    sizeof(sa));
+        if (fn > 0) {
+          ++ok;
+        } else {
+          st_send_errors_.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      if (ok == 0) {
+        return Status::IOError("DATA_FRAG 分片全部发送失败");
+      }
+      st_frag_samples_.fetch_add(1, std::memory_order_relaxed);
+      st_frag_packets_.fetch_add(frags.size(), std::memory_order_relaxed);
+      ++sent;
+      return Status::OK();   // 见上：分片样本不入 pending_
+    }
+
     const ssize_t n_sent =
         ::sendto(fd_tx_, packet.data(), packet.size(), 0,
                  reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));

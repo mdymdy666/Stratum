@@ -4221,3 +4221,84 @@ B 段:  录制 157 条，序号缺口 0  →  回放 157  →  订阅端 RECEIVE
 | `BuildDataFragPackets` | ✅ 已实现、未启用 |
 | DATA_FRAG 接线 | ❌ 未通过 → 已回退 |
 | 基线在 ROS 运行时是否可信 | ✅ **可信**（这是本轮的主要修复） |
+
+---
+
+## 2026-10-13（续 58）| ✅✅ DATA_FRAG 成功：大 payload 跨主机问题从根上解决
+
+### 一、结果
+
+**字节级单元测试**（`tests/manual/test_data_frag.cc`，独立编译运行）：
+
+```
+=== DATA_FRAG 构造检查（payload=8000, fragmentSize=1416）===
+  期望片数 = 6，实际 = 6                      OK
+  RTPS 魔数 / guidPrefix                      OK
+  子消息 id = DATA_FRAG(0x16)                 OK
+  octetsToNextHeader = 子消息体长度            OK
+  octetsToInlineQos = 28                      OK
+  writerId 正确（大端）                        OK
+  writerSN 正确（所有分片共用）                 OK
+  fragmentStartingNum 从 1 递增                OK
+  fragmentsInSubmessage = 1                   OK
+  fragmentSize = 请求值                        OK
+  sampleSize = 完整样本长度                     OK
+  本片负载长度/内容与源一致                      OK
+    [片 1] 报文 1472 字节，负载 1416 字节，起始 1
+    [片 6] 报文 976 字节，负载 920 字节，起始 6
+结果：PASS（失败项 0）
+```
+
+**端到端**（8000B 样本 + `STRATUM_MAX_UDP_PAYLOAD=1472`，Fast DDS 订阅端）：
+* 回放端 `已发布样本 = 5`，订阅端 `samples = 6`（5 + 1 首条补救副本）；
+* 又用 10 条 8000B 样本复测：**回放 10 → 订阅端 samples = 10**，完全一致。
+
+**单机基线（默认不限，行为不变）**：`ctest` **33/33**、对账 A **200/200**（缺口 0）、
+对账 B **158**、大 payload **21/20、21/20、11/10**。
+
+### 二、上一轮接线失败的真正原因（已定位）
+
+`Publish` 里**在 peer 循环之前**还留着上一轮加的 MTU"显式失败"分支：
+
+```cpp
+auto packet = BuildDataPacket(...);
+if (config_.max_udp_payload > 0 && packet.size() > limit) {
+    return Status::InvalidArgument("样本超过配置的 UDP 载荷上限 ...");   // ← 在这里就 return 了
+}
+...
+for (const Peer& peer : peers) { ... 我写的分片分支 ... }              // ← 永远到不了
+```
+
+所以分片代码虽然写对了，却**从未被执行**。删掉这个提前 return、让分片分支接管后，
+一次通过。
+
+**这正是"先做字节级验证"的价值**：单测证明分片报文合规之后，
+问题范围立刻收敛到"接线"，从而发现是执行顺序问题 —— 而不是继续怀疑报文格式。
+
+### 三、本轮改动
+
+| 文件 | 改动 |
+|---|---|
+| `src/include/.../rtps_packet_utils.h` | 新增 `kSubDataFrag = 0x16`、声明 `BuildDataFragPackets` |
+| `src/rtps/protocol/rtps_packet_utils.cc` | 实现 `BuildDataFragPackets`（按 RTPS 2.3 §9.6.3.6） |
+| `src/include/.../rtps_writer.h` | `max_udp_payload` 配置；`st_frag_samples_`/`st_frag_packets_` 统计 |
+| `src/rtps/protocol/rtps_writer.cc` | 删除循环前的 MTU 提前返回；在 peer 循环内加分片分支（提前返回，不入 `pending_`） |
+| `src/rtps/protocol/rtps_backend.cc` | `STRATUM_MAX_UDP_PAYLOAD` 环境变量接线 |
+| `tests/manual/test_data_frag.cc` | **字节级验证单测**（新增） |
+| `scenarios/08_accounting.sh` | 挪到 domain 40（见续 57） |
+
+### 四、已知限制（如实说明）
+
+* **分片样本暂不具备重传能力** —— 为避免把超过 64KiB 的完整报文塞进 `pending_`，
+  分片路径提前 `return`。可靠传输层面的分片重传留待后续；
+* **接收侧（`RtpsReader`）尚未实现 `DATA_FRAG` 重组** ——
+  因此该能力目前用于**发往 Fast DDS 等标准实现**；
+  Stratum↔Stratum 的大 payload 跨主机仍需补接收侧；
+* `fragment_size` 目前由 `max_udp_payload - 56` 推导，未做路径 MTU 探测。
+
+### 五、方法论（本轮最值钱的一条）
+
+**新增功能接进主流程之前，先用单元测试验证"产物本身"是否正确。**
+上一轮跳过这一步，直接接线 → 端到端失败 → 无法区分是产物错还是接线错 →
+连续多轮在错误的方向上打转。这一轮先花 10 分钟做字节级验证，
+拿到 PASS 后，问题范围立刻收敛，接线一次通过。
