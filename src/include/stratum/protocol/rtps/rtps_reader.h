@@ -209,6 +209,15 @@ class RtpsReader {
   // 处理 DATA_FRAG 子消息；收齐后走与 DATA 相同的交付路径
   void HandleDataFrag(const uint8_t* buf, size_t n, uint32_t body);
 
+  // 【接收侧丢包注入，仅测试用】由 STRATUM_DEBUG_DROP_RECV_PERCENT 控制。
+  //
+  // 为什么需要它：发送侧的 STRATUM_DEBUG_DROP_SEND_PERCENT 是在 Publish 入口
+  // 丢弃，样本**从未上过网络**，对端根本不知道存在那个 SN，ACKNACK 自然不会
+  // 报告缺失，重传路径永远不触发（实测 [resend] 从未打印）。
+  // 在**接收侧**注入则相反：包已到达但被丢弃、且**不记录 SN**，
+  // 于是 ACKNACK 会如实报缺口，发送端的退避重传才有事可做。
+  static bool ShouldDropRecvForTest();
+
   void HandleHeartbeat(const uint8_t* packet, size_t len, uint32_t body,
                        const eprosima::fastdds::rtps::SubmessageHeader_t& smh,
                        const PeerAddress& src);

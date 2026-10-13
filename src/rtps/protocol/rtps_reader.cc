@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <random>   // 接收侧丢包注入用（仅测试）
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -668,6 +669,12 @@ void RtpsReader::ReceiveLoop() {
               // 旧实现读的是 ids+8（高位），于是**所有样本的 sequence 都是 0**，
               // 数据质量报告里的序号缺口检测随之完全失效。
               std::memcpy(&sn_low, msg.buffer + ids + 12, 4);
+              // 【接收侧丢包注入，仅测试用】在**记录 SN 之前**丢弃：
+              // 这样 ACKNACK 会如实报告缺口，发送端的退避重传才被真正触发
+              // （发送侧注入是在上网前丢弃，对端不知道存在该 SN，测不出重传）。
+              if (ShouldDropRecvForTest()) {
+                break;   // 丢掉整个报文，且不记录 SN
+              }
               first_time = RecordReceivedSn(wid, sn_low);
             }
             if (wid == kSpdpWriter) {
@@ -1074,6 +1081,20 @@ void RtpsReader::HandleHeartbeat(const uint8_t* packet, size_t len,
 //
 // 内存受控：只保留每个 writer 最近的 kKeepWindow 个 SN。ACKNACK 只关心
 // "当前还缺哪些"，过老的 SN 已经没有意义（对端也不会再重传那么早的数据）。
+// 【接收侧丢包注入】按 STRATUM_DEBUG_DROP_RECV_PERCENT（0~100）概率返回 true。
+// 线程局部 RNG，避免与其它路径共享状态。
+bool RtpsReader::ShouldDropRecvForTest() {
+  static const int pct = []() {
+    const char* v = std::getenv("STRATUM_DEBUG_DROP_RECV_PERCENT");
+    return v == nullptr ? 0 : std::atoi(v);
+  }();
+  if (pct <= 0) return false;
+  if (pct >= 100) return true;
+  static thread_local std::mt19937 rng{std::random_device{}()};
+  static thread_local std::uniform_int_distribution<int> dist(1, 100);
+  return dist(rng) <= pct;
+}
+
 bool RtpsReader::RecordReceivedSn(uint32_t writer_entity, uint64_t sn) {
   constexpr uint64_t kKeepWindow = 4096;
   std::lock_guard<std::mutex> lock(mutex_);
