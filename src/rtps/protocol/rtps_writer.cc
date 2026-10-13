@@ -880,6 +880,10 @@ void RtpsWriter::HandleAcknack(const uint8_t* packet, size_t len,
 // 分片样本按原始 payload **重新切片**发送（pending_ 里不缓存超大报文）。
 // ---------------------------------------------------------------------------
 void RtpsWriter::DriveResends() {
+  // 【归因实验用】置 1 可关闭退避重传，用于确认"数据最终被补齐"
+  // 到底是本机制还是其它既有重发路径（例如收尾补救）。
+  if (std::getenv("STRATUM_DISABLE_RESEND") != nullptr) return;
+
   constexpr uint32_t kMaxResend = 6;
   constexpr uint64_t kMaxBackoffMs = 1000;
 
