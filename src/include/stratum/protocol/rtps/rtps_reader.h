@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <netinet/in.h>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -185,6 +186,29 @@ class RtpsReader {
   void ReceiveLoop();
 
   // 子消息处理（packet 为整包，body 为子消息体起始偏移）
+  // 【DATA_FRAG 重组】按 (writer GUID, SN) 缓存分片。
+  //
+  // 为什么必须有：MTU 1500 的路径上不分片 UDP 上限是 1472 字节，超出需 IP 分片，
+  // 而 IP 分片在 NAT/中继路径上会被丢弃。对端（若支持 DATA_FRAG）会把大样本切片发来，
+  // 接收侧必须缓存并重组，否则大 payload 一条都收不到（本项目跨主机实测）。
+  struct FragBuf {
+    uint32_t sample_size = 0;      // 完整样本长度
+    uint16_t frag_size = 0;        // 每片字节数（最后一片可能更短）
+    uint32_t got_frags = 0;        // 已收到的片数
+    std::vector<uint8_t> data;     // 重组缓冲（sample_size 大小）
+    std::vector<bool> have;        // 各片是否已收到
+    uint64_t first_seen_ms = 0;    // 用于超时淘汰
+    TimestampNs source_ts_ns = kInvalidTimestamp;
+  };
+  std::map<std::string, FragBuf> frag_bufs_;   // key: guidPrefix+entityId+SN
+  size_t frag_bufs_bytes_ = 0;                 // 缓存占用（用于上限控制）
+
+  // 回收超时/超量的分片缓存（避免内存无界增长）
+  void SweepFragBufs(uint64_t now_ms);
+
+  // 处理 DATA_FRAG 子消息；收齐后走与 DATA 相同的交付路径
+  void HandleDataFrag(const uint8_t* buf, size_t n, uint32_t body);
+
   void HandleHeartbeat(const uint8_t* packet, size_t len, uint32_t body,
                        const eprosima::fastdds::rtps::SubmessageHeader_t& smh,
                        const PeerAddress& src);

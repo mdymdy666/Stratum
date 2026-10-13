@@ -618,6 +618,8 @@ void RtpsReader::ReceiveLoop() {
           HandleInfoTimestamp(buf, static_cast<size_t>(n), body);
         } else if (smh.submessageId == kSubHeartbeat) {
           HandleHeartbeat(buf, static_cast<size_t>(n), body, smh, src_addr);
+        } else if (smh.submessageId == packet::kSubDataFrag) {
+          HandleDataFrag(buf, static_cast<size_t>(n), body);
         } else if (smh.submessageId == kSubData) {
           const size_t prefix = DataTypePrefixSize(msg.buffer + body,
                                                    msg.length - body, ver_minor);
@@ -1243,6 +1245,133 @@ RtpsReader::Stats RtpsReader::GetStats() const {
   return s;
 }
 
+
+
+// ---------------------------------------------------------------------------
+// DATA_FRAG 重组
+//
+// 子消息体布局（RTPS 2.3 §9.6.3.6），自 body 起：
+//   extraFlags(2) octetsToInlineQos(2) readerId(4) writerId(4) writerSN(8)
+//   fragmentStartingNum(4) fragmentsInSubmessage(2) fragmentSize(2) sampleSize(4)
+//   serializedPayload
+// 固定字段共 32 字节（不含子消息头）。
+// ---------------------------------------------------------------------------
+void RtpsReader::SweepFragBufs(uint64_t now_ms) {
+  for (auto it = frag_bufs_.begin(); it != frag_bufs_.end();) {
+    if (now_ms - it->second.first_seen_ms > 30000) {   // 30 秒未收齐则丢弃
+      frag_bufs_bytes_ -= it->second.data.size();
+      it = frag_bufs_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void RtpsReader::HandleDataFrag(const uint8_t* buf, size_t n, uint32_t body) {
+  const size_t fixed = 32;
+  if (body + fixed > n) return;
+
+  const uint8_t* b = buf + body;
+  uint32_t wid = 0, start = 0, sample_size = 0;
+  uint64_t sn = 0;
+  uint16_t in_sub = 0, fsz = 0;
+  std::memcpy(&wid, b + 8, 4);
+  {
+    uint32_t hi = 0, lo = 0;
+    std::memcpy(&hi, b + 12, 4);
+    std::memcpy(&lo, b + 16, 4);
+    sn = (static_cast<uint64_t>(hi) << 32) | lo;
+  }
+  std::memcpy(&start, b + 20, 4);
+  std::memcpy(&in_sub, b + 24, 2);
+  std::memcpy(&fsz, b + 26, 2);
+  std::memcpy(&sample_size, b + 28, 4);
+
+  if (fsz == 0 || sample_size == 0 || in_sub == 0) return;
+  const size_t pl_off = body + fixed;
+  if (pl_off > n) return;
+
+  const uint64_t now_ms = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count());
+  SweepFragBufs(now_ms);
+
+  // 只处理我们关心的用户数据 writer（内建 writer 不分片）
+  if (IsBuiltinWriter(wid)) return;
+
+  char key[64];
+  std::snprintf(key, sizeof(key), "%.12s|%08x|%llu",
+                reinterpret_cast<const char*>(buf + 8), wid,
+                static_cast<unsigned long long>(sn));
+
+  FragBuf& fb = frag_bufs_[key];
+  if (fb.data.empty()) {
+    fb.sample_size = sample_size;
+    fb.frag_size = fsz;
+    fb.data.assign(sample_size, 0);
+    const uint32_t nf = (sample_size + fsz - 1) / fsz;
+    fb.have.assign(nf, false);
+    fb.got_frags = 0;
+    fb.first_seen_ms = now_ms;
+    fb.source_ts_ns = last_info_ts_ns_;
+    frag_bufs_bytes_ += sample_size;
+  }
+
+  // 本次子消息可能含多个连续分片
+  const size_t avail = n - pl_off;
+  for (uint16_t k = 0; k < in_sub; ++k) {
+    const uint32_t fnum = start + k;              // 从 1 起
+    const size_t off = static_cast<size_t>(fnum - 1) * fsz;
+    if (off >= sample_size) break;
+    const size_t len = (off + fsz <= sample_size) ? fsz : (sample_size - off);
+    if (k * fsz + len > avail) break;
+    if (fnum - 1 < fb.have.size() && !fb.have[fnum - 1]) {
+      std::memcpy(fb.data.data() + off, buf + pl_off + k * fsz, len);
+      fb.have[fnum - 1] = true;
+      ++fb.got_frags;
+    }
+  }
+
+  if (fb.got_frags < fb.have.size()) return;   // 还没收齐
+
+  // ---- 收齐：走与 DATA 相同的交付路径 ----
+  UserData ud;
+  ud.reception_timestamp_ns = static_cast<TimestampNs>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+  ud.source_timestamp_ns = fb.source_ts_ns;
+  std::memcpy(ud.writer_guid.guidPrefix.value, buf + 8, 12);
+  ud.writer_guid.entityId = EntityId_t(wid);
+  ud.sequence = static_cast<uint32_t>(sn & 0xFFFFFFFFu);
+  ud.payload.assign(reinterpret_cast<const char*>(fb.data.data()), fb.data.size());
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& kv : writers_) {
+      const RemoteWriter& w = kv.second;
+      if (std::memcmp(w.guid.guidPrefix.value,
+                      ud.writer_guid.guidPrefix.value, 12) == 0 &&
+          w.guid.entityId == ud.writer_guid.entityId) {
+        ud.topic_name = w.topic_name;
+        ud.type_name = w.type_name;
+        break;
+      }
+    }
+  }
+
+  RecordReceivedSn(wid, static_cast<uint32_t>(sn & 0xFFFFFFFFu));
+  st_samples_.fetch_add(1, std::memory_order_relaxed);
+
+  frag_bufs_bytes_ -= fb.data.size();
+  frag_bufs_.erase(key);
+
+  if (callback_) {
+    callback_(ud);
+  }
+}
+
+}  // namespace stratum
+
 }  // namespace rtps
 }  // namespace protocol
-}  // namespace stratum
