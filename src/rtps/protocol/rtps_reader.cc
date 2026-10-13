@@ -1127,8 +1127,17 @@ uint32_t RtpsReader::PairReaderEntity(uint32_t writer_entity) {
 void RtpsReader::SendAcknackForReceived(uint32_t writer_entity, uint64_t sn) {
   const uint32_t reader_id = PairReaderEntity(writer_entity);
 
-  // base = sn + 1、位图为空 ⇒ "sn 及之前全部收到"的纯确认。
-  const int64_t base = static_cast<int64_t>(sn + 1);
+  // 【必须按真实收到的 SN 集合报告缺口 —— 这是重传能否工作的关键】
+  //
+  // 旧实现传 base = sn+1、hi = sn，语义等价于声明"**sn 及之前全部收到**"。
+  // 这是错的：只要有一个靠后的样本（乱序、或前面若干个被丢弃）到达，
+  // 发送端就会把所有更早的 pending 样本标记为 acked —— **重传永远不触发**。
+  // 实测：接收侧注入 30% 丢包时，[resend] 打印始终为空，收敛率仅 53%；
+  // 而分片样本反而"看起来正常"，是因为它另有恢复途径，与重传无关。
+  //
+  // 现在改为把 [1, sn] 整段交给 SendAcknack，由它用 received_sn_ 集合
+  // 自己算出 base 与位图（那段逻辑本来就是对的）。
+  const int64_t base = 1;                       // 交给 SendAcknack 重新计算
   const int64_t hi = static_cast<int64_t>(sn);
 
   // 【关键】ACKNACK 必须发到该 writer **自己的 user locator**
