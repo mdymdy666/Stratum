@@ -278,6 +278,8 @@ class RtpsReader {
   eprosima::fastdds::rtps::GUID_t my_participant_guid_;
 
   std::vector<uint8_t> spdp_payload_;
+  // 对外声明的地址（SPDP 与 SEDP 必须用同一个，见 rtps_reader.cc 注释）
+  std::string advertised_address_;
 
   std::atomic<uint64_t> st_packets_{0};
   std::atomic<uint64_t> st_spdp_{0};

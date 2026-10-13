@@ -4608,3 +4608,76 @@ SPDP **只声明该地址**（不要额外附上 `DetectLocalAddress()` 得到�
 
 **P2 续**：让 SPDP 在设置了 `advertised_address` 时只声明该地址，然后重跑反向右放。
 之后继续 P3（重传退避）、P4（接收侧压测）、P5（一键启动）、P6（位图单测）。
+
+---
+
+## 2026-10-13（续 64）| ✅✅ P2 完成：**跨主机反向回放打通**（81/80）
+
+### 一、结果
+
+```
+虚拟机回放 80 条  ->  WSL 收到 81（80 + 1 首条补救副本）      ✅ PASS
+WSL 统计: samples=81  hb=1  ack=84  sedp_pub=2  peers=1
+正向回归: 虚拟机收到 201 / PASS                              ✅
+```
+
+**双向跨主机收发现在都打通了。**
+
+### 二、根因是**两层**问题，缺一不可
+
+**第一层：中继端口公式错了 10 个端口**（上一轮发现）
+
+| 用途 | 实际 | 此前配置 |
+|---|---|---|
+| metatraffic | **9350** | ~~9360~~ |
+| user data | **9351** | ~~9361~~ |
+
+正确公式 `9050/9051 + domain*10`。错配导致对端发往 `192.168.100.1:9350` 的
+SEDP Publication 全部落到无人监听端口被丢弃（症状：`spdp` 正常、`sedp_pub=0`）。
+
+**第二层：SEDP 公告没有使用 `advertised_address`**（本轮发现）
+
+`rtps_packet_utils.cc` 的这个回退是罪魁：
+
+```cpp
+a.unicast_address.empty() ? DetectLocalAddress() : a.unicast_address;
+```
+
+`BuildSedpAnnouncementForReader` **从未设置 `unicast_address`**，于是 SEDP 里
+声明的是 `DetectLocalAddress()` 得到的**真实地址**（WSL 的 `172.17.211.143`）。
+在 NAT + 中继拓扑下**该地址对端根本不可达**，对端于是把样本全发进黑洞。
+
+**注意 SPDP 一直是对的** —— 它在 `rtps_reader.cc` 里显式用了 `adv`
+（`config_.advertised_address`）。所以症状非常具有迷惑性：
+**发现成功（SPDP 对）、SEDP 也"成功"（`sedp_pub=41`）、Writer 也匹配上了，
+但一条数据都收不到**，而且中继统计显示对端**压根没往中继发数据**（`to_wsl=0`）。
+
+定位靠的是在**对端**打开 `STRATUM_DUMP`，直接看到：
+
+```
+[send] has_user=1 -> 172.17.211.143:9351     ← 发到了真实地址（不可达）
+```
+
+**教训**：当"发现层一切正常但数据不到"时，**去对端打印它实际发送的目标地址**，
+比在本端反复分析报文快得多。
+
+### 三、改动
+
+| 文件 | 改动 |
+|---|---|
+| `rtps_reader.cc` | `BuildSedpAnnouncementForReader` 增加 `advertised_address` 参数；两处调用传入；`Open` 中把 `adv` 存入成员 `advertised_address_` |
+| `rtps_reader.h` | 新增成员 `advertised_address_` |
+| `rtps_packet_utils.cc` | （逻辑不变，其回退语义现在被正确使用） |
+
+### 四、基线（零回归）
+
+* `ctest` **33/33**
+* 对账 A **200/200**（缺口 0）、对账 B **157~159**
+* 大 payload（单机）**21/20、21/20、10/10**
+* **正向跨主机 201 / PASS**
+* **反向跨主机 81/80 / PASS**（本轮新增能力）
+
+### 五、下一轮计划
+
+P2 已完成，按顺序进入 **P3（分片重传退避策略，提升 ≥10% 丢包收敛率）**。
+之后 P4（DATA_FRAG 接收侧压测）、P5（一键启动）、P6（ACKNACK 位图单测）。

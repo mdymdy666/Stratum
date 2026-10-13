@@ -297,7 +297,7 @@ std::vector<uint8_t> BuildSedpAnnouncementForReader(
     const std::string& type_name, uint16_t user_port, uint64_t sn,
     uint32_t requested_reliability, uint32_t requested_durability,
     const std::vector<uint32_t>& requested_representations,
-    uint32_t target_writer_entity) {
+    uint32_t target_writer_entity, const std::string& advertised_address) {
   packet::EndpointAnnouncement a;
   std::memcpy(a.prefix, prefix, 12);
   a.writer_entity = packet::kEntitySedpSubWriter;   // 订阅公告由 sub writer 承载
@@ -317,6 +317,12 @@ std::vector<uint8_t> BuildSedpAnnouncementForReader(
   a.topic_name = topic_name;
   a.type_name = type_name;
   a.unicast_port = user_port;
+  // 【必须与 SPDP 声明同一个地址】此前没设置该字段，构造时会回退到
+  // DetectLocalAddress()（本机探测到的真实地址）。在 NAT + UDP 中继拓扑下，
+  // 真实地址（如 WSL 的 172.17.x.x）**对端根本不可达**，于是对端把样本
+  // 全发到这个黑洞地址：表现为"发现成功、SEDP 正常，但一条数据都收不到"，
+  // 且中继统计显示对端压根没往中继发数据（实测 to_wsl=0）。
+  a.unicast_address = advertised_address;
   // 【声明必须与内部请求一致】
   //
   // 曾经无论 `config_.requested_qos` 是什么，都在 Subscription 里声明
@@ -379,6 +385,7 @@ Status RtpsReader::Open(const RtpsReaderConfig& config) {
   const std::string adv = config_.advertised_address.empty()
                               ? packet::DetectLocalAddress()
                               : config_.advertised_address;
+  advertised_address_ = adv;   // SEDP 公告也要用同一个地址
   SpdpAnnounceConfig sc;
   std::memcpy(sc.guid_prefix.value, my_prefix_, 12);
   sc.domain_id = config_.domain_id;
@@ -931,7 +938,8 @@ void RtpsReader::PublishSubscription(const RemoteWriter& writer) {
       config_.requested_qos.reliability_kind,
       config_.requested_qos.durability_kind,
       config_.requested_qos.data_representations,
-      EntityVal(writer.guid.entityId.value));
+      EntityVal(writer.guid.entityId.value),
+      advertised_address_);
   if (payload.empty()) return;
 
   for (const Peer& peer : peers) {
@@ -987,7 +995,8 @@ void RtpsReader::ReannounceSubscriptions() {
         config_.requested_qos.reliability_kind,
         config_.requested_qos.durability_kind,
         config_.requested_qos.data_representations,
-        EntityVal(w.guid.entityId.value));
+        EntityVal(w.guid.entityId.value),
+        advertised_address_);
     if (payload.empty()) continue;
     for (const Peer& peer : peers) {
       const sockaddr_in sa = ToSockaddr(peer.addr);
