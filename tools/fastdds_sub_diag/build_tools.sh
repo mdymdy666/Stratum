@@ -50,3 +50,4 @@ build_one "$ROOT/tools/stratum_rtps_replay.cc" /UserData/CodexWorkSpace/Stratum/
 build_one "$ROOT/tools/stratum_rtps_record.cc" /UserData/CodexWorkSpace/Stratum/build/tools/stratum_rtps_record
 build_one "$ROOT/tools/rtps_sink_diag2.cc" /UserData/CodexWorkSpace/Stratum/build/tools/rtps_sink_diag2
 build_one "$ROOT/tools/rtps_reader_diag.cc" /UserData/CodexWorkSpace/Stratum/build/tools/rtps_reader_diag
+build_one "$ROOT/tools/frag_fuzz.cc" /UserData/CodexWorkSpace/Stratum/build/tools/frag_fuzz

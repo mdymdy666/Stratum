@@ -410,6 +410,25 @@ struct AckPathStats {
 };
 AckPathStats AckPathStatsSnapshot();
 
+// ACKNACK 中"某个 SN"的判定结果（三条互斥路径）。
+enum class AckPath {
+  BaseAcked,     // ① sn < base_sn：reader 已确认收到
+  BitmapHit,     // ② 位图覆盖该 SN：按位判定（missing 出参给出是否缺失）
+  BeyondBitmap,  // ③ 位图未覆盖：保守视为缺失
+};
+
+// 【抽成纯函数是为了可单测】
+//
+// 这段判定此前内嵌在 HandleAcknack 的 lambda 里，只能靠端到端现象间接验证，
+// 遗留问题 O10 记的就是"位图分支从未被单元测试覆盖"。抽出来后可以直接构造
+// 边界报文逐位验证：位图首字节/末字节、非字节对齐的位序、位图长度为 0、
+// base_sn 与位图边界重合等情况。
+//
+// bitmap 指向位图的第一个字节，bitmap_len 为其字节数。
+// 返回值：该 SN 落在哪条路径；当返回 BitmapHit 时，*missing 给出位图位。
+AckPath AckClassifySn(uint32_t sn_low, uint32_t base_sn, uint32_t num_bits,
+                      const uint8_t* bitmap, size_t bitmap_len, bool* missing);
+
 }  // namespace rtps
 }  // namespace protocol
 }  // namespace stratum

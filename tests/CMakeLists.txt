@@ -23,6 +23,7 @@ endfunction()
 
 stratum_add_test(test_storage_contract unit/test_storage_contract.cc unit storage)
 stratum_add_test(test_time_key unit/test_time_key.cc unit storage)
+stratum_add_test(test_ack_bitmap unit/test_ack_bitmap.cc unit storage)   # O10：ACKNACK 位图判定
 
 stratum_add_test(test_timeline_basic integration/test_timeline_basic.cc integration)
 

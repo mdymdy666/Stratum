@@ -114,3 +114,12 @@ done
 
 **注意**：`10_bench.sh`、`13_soak.sh`、`14_random_suite.sh` 耗时较长（分钟级到半小时级），
 按需单独运行。所有日志在 `build/tools/logs/`（**不要用 `/tmp`**：本会话被系统清理过三次）。
+
+### 新增（2026-10-13）
+
+| 项 | 覆盖 | 结果 |
+|---|---|---|
+| `scenarios/26_frag_stress.sh` | DATA_FRAG 接收侧：多 writer 交错 / 缓存上限 / 畸形分片 / 部分分片不误交付 | 4 项全 PASS |
+| `tests/unit/test_ack_bitmap.cc` | ACKNACK 位图三条路径 + 大端位序 + 跨字节 + 边界 | 5 用例全 PASS（`ctest` 34/34） |
+| `tools/frag_fuzz.cc` | 分片注入工具（partial / overflow / malformed） | 支撑上述场景 |
+| `tools/start_cross_host.py` | 跨主机环境一键准备 | 主流程实测通过 |

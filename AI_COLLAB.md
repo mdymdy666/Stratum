@@ -5006,3 +5006,64 @@ Stratum/参与者**在同一网段活动，值得后续留意；但不影响本�
 ### 五、基线（零回归）
 
 * `ctest` 33/33；对账 A 200/200（缺口 0）。
+
+---
+
+## 2026-10-13（续 71）| ✅ P4 / P5 / P6 全部完成并提交
+
+### 一、P6：ACKNACK 位图分支单测（原遗留 O10）
+
+把 `HandleAcknack` 内嵌的位图判定抽成纯函数 **`AckClassifySn()`**（三条互斥路径
+`BaseAcked` / `BitmapHit` / `BeyondBitmap`），`is_missing` 改为复用它。
+新增 `tests/unit/test_ack_bitmap.cc`，**5 个用例全 PASS**：
+
+* base 路径（`sn < base_sn`，且 `sn == base_sn` 的边界不走该路径）；
+* **大端位序**验证（第 0 位取 byte0 的 bit7，第 7 位取 bit0）；
+* 跨字节（第 8~15 位落在第二字节）；
+* 位图外 / `num_bits=0` / 位图字节不足 / `bitmap=nullptr`（保守判缺失）；
+* `missing` 出参可传 `nullptr` 不崩。
+
+`ctest` 由 **33 → 34/34**。
+> 写测试时我先写错了一条期望（`idx=8` 但只给 1 字节，实现**正确**地判为位图外，
+> 我误期望为命中）—— 是测试期望错、实现对，已修正并在注释里写明。
+
+### 二、P5：一键启动脚本 `tools/start_cross_host.py`
+
+四步合一：确认/启动虚拟机（vmrun）→ 读取当前 WSL IP → **按 domain 算出三个端口**
+启动中继 → 健康检查（虚拟机 SSH、WSL→虚拟机连通性）→ 打印可直接复制的测试命令。
+
+**实测要点**：首次运行取不到 WSL IP —— 原因是
+"从 Windows 通过 `wsl.exe` 调用时命令里的 `$4` 被参数处理吞掉"（本项目多次踩过）。
+改用 `hostname -I` 并把解析放到 Python 侧后正常。
+
+### 三、P4：DATA_FRAG 接收侧健壮性
+
+新增注入工具 **`tools/frag_fuzz.cc`**（三种模式：`partial` / `overflow` / `malformed`，
+基础分片格式复用 `BuildDataFragPackets` 以保证与真实路径一致）
+与场景 **`scenarios/26_frag_stress.sh`**，结果：
+
+| 子项 | 结果 |
+|---|---|
+| 多 writer 交错分片（2 话题 × 8KB） | 发现话题 2 个，**收到 101/100** ✅ |
+| 缓存上限（500 个不同 SN 各 1 片，永不收齐） | **进程存活**，RSS 4MB→8MB（与 500×8KB 的缓冲量吻合）✅ |
+| 畸形分片（fragmentSize=0 / sampleSize=0 / 计数极大 / 起始号越界） | **100 个畸形报文后仍存活** ✅ |
+| 部分分片不误交付（只发首片） | **收到 0** ✅（不完整样本不会被错误交付） |
+
+### 四、顺带修掉的一个真实问题：**CRLF 污染**
+
+用 Windows Python 写 WSL 文件时，`io.open(..., "w")` 的默认换行转换会把 `\n`
+变成 `\r\n`，于是 `build_tools.sh` 的 `set -euo pipefail\r` 报
+**`invalid option name`** —— 整个工具构建链直接失效。
+
+**修复**：项目内 `.sh`/`.py` 全部转 LF；此后写 WSL 文本文件一律显式
+`newline=""`（本次文档更新已这么做）。
+
+### 五、全量基线（全绿）
+
+| 项 | 结果 |
+|---|---|
+| `ctest` | **34/34** |
+| 对账 A / B | **200/200**（缺口 0）、**157** |
+| 大 payload | 20/20、20/20、11/10 |
+| P4 健壮性 | **4 项全 PASS** |
+| 跨主机 | **201 / PASS** |

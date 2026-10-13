@@ -98,6 +98,21 @@ F:\vmware\vmrun.exe list
 F:\vmware\vmrun.exe start "F:\xvniji\Centos9_1kelong3\centos9_2.vmx" gui
 ```
 
+**第一步半（推荐）：一键准备环境**
+
+以上第 1~3 步可以一次性完成，且会自动用正确的端口与地址：
+
+```powershell
+python \\wsl.localhost\Ubuntu\UserData\CodexWorkSpace\Stratum\tools\start_cross_host.py
+```
+
+它会：确认/启动虚拟机 → 读取当前 WSL IP → 用 **按 domain 算出的三个端口**
+启动中继 → 健康检查（虚拟机 SSH、WSL→虚拟机连通性）→ 打印可直接复制的测试命令。
+
+> 为什么值得用它：中继端口必须按 domain 算全
+> （SPDP=`7400+d*250`、metatraffic=`9050+d*10`、user=`9051+d*10`），
+> 漏掉任一个都会表现为"发现不了对端"或"发现成功却一条数据都收不到"，**且没有任何报错**。
+
 **第二步：启动中继**（Windows 侧，普通用户权限）
 
 ```powershell

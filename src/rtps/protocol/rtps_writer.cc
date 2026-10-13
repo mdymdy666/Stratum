@@ -820,28 +820,29 @@ void RtpsWriter::HandleAcknack(const uint8_t* packet, size_t len,
   std::memcpy(&num_bits, packet + body + 20, 4);
 
   // 位图按大端位序：第 i 位（从 0 起）对应 base_sn + i，取 byte i/8 的 bit (7 - i%8)。
+  // 位图起点与可用字节数（判定逻辑复用 AckClassifySn，便于单测覆盖）。
+  const uint8_t* bm = packet + body + 24;
+  const size_t bm_len = (body + 24 <= len) ? (len - body - 24) : 0;
   auto is_missing = [&](uint32_t low) -> bool {
-    if (low < base_low) {
-      g_ack_base_acked.fetch_add(1, std::memory_order_relaxed);   // ① 路径
-      return false;                                  // reader 已确认收到
+    bool miss = false;
+    const AckPath path =
+        AckClassifySn(low, base_low, num_bits, bm, bm_len, &miss);
+    switch (path) {
+      case AckPath::BaseAcked:
+        g_ack_base_acked.fetch_add(1, std::memory_order_relaxed);   // ①
+        return false;
+      case AckPath::BeyondBitmap:
+        g_ack_beyond_bitmap.fetch_add(1, std::memory_order_relaxed); // ③
+        return true;
+      case AckPath::BitmapHit:
+        // 走到这里说明**真的解析了位图的某一位** —— 这正是 O10 要的证据。
+        g_ack_bitmap_checked.fetch_add(1, std::memory_order_relaxed);
+        if (miss) {
+          g_ack_bitmap_missing.fetch_add(1, std::memory_order_relaxed); // ②
+        }
+        return miss;
     }
-    const uint32_t idx = low - base_low;
-    if (idx >= num_bits) {
-      g_ack_beyond_bitmap.fetch_add(1, std::memory_order_relaxed); // ③ 路径
-      return true;                                   // 位图未覆盖 → 视为缺失
-    }
-    const size_t off = static_cast<size_t>(body) + 24 + (idx / 8);
-    if (off >= len) {
-      g_ack_beyond_bitmap.fetch_add(1, std::memory_order_relaxed);
-      return true;
-    }
-    // 走到这里说明**真的解析了位图的某一位** —— 这才是 O10 要的证据。
-    g_ack_bitmap_checked.fetch_add(1, std::memory_order_relaxed);
-    const bool miss = (packet[off] & (1u << (7 - (idx % 8)))) != 0;
-    if (miss) {
-      g_ack_bitmap_missing.fetch_add(1, std::memory_order_relaxed); // ② 路径：缺失
-    }
-    return miss;
+    return true;
   };
 
   // 【退避重传：只排期，不立即发送】
@@ -1534,6 +1535,27 @@ RtpsWriter::Stats RtpsWriter::GetStats() const {
     s.peers_learned = peers_.size();
   }
   return s;
+}
+
+// ACKNACK 位图判定（纯函数，见头文件说明；抽出来是为了可单测覆盖三条路径）。
+AckPath AckClassifySn(uint32_t sn_low, uint32_t base_sn, uint32_t num_bits,
+                      const uint8_t* bitmap, size_t bitmap_len, bool* missing) {
+  if (missing != nullptr) *missing = false;
+  if (sn_low < base_sn) {
+    return AckPath::BaseAcked;                       // ①
+  }
+  const uint32_t idx = sn_low - base_sn;
+  if (idx >= num_bits) {
+    return AckPath::BeyondBitmap;                    // ③
+  }
+  const size_t off = static_cast<size_t>(idx / 8);
+  if (bitmap == nullptr || off >= bitmap_len) {
+    return AckPath::BeyondBitmap;                    // 位图字节不够，保守处理
+  }
+  // 位图按大端位序：第 idx 位取 byte[idx/8] 的 bit (7 - idx%8)。
+  const bool miss = (bitmap[off] & (1u << (7 - (idx % 8)))) != 0;
+  if (missing != nullptr) *missing = miss;
+  return AckPath::BitmapHit;                         // ②
 }
 
 AckPathStats AckPathStatsSnapshot() {
