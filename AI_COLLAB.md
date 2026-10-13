@@ -5118,3 +5118,50 @@ Stratum/参与者**在同一网段活动，值得后续留意；但不影响本�
 ### 五、全量基线（零回归）
 
 见上方输出。V1 状态：`ctest` 34/34、对账 200/200（缺口 0）、大 payload 全过、P4 健壮性全 PASS。
+
+---
+
+## 2026-10-13（续 73）| C++ 示例：把框架的全部对外能力呈现给 C++ 程序员
+
+### 一、新增 `examples/cpp/`（4 个，全部编译通过 + 实测运行）
+
+| 示例 | 演示的 API | 实测结果 |
+|---|---|---|
+| `01_record_and_replay` | `TimelineImplV2` + `RtpsBackend` + `Recorder` + `Query` + `Player` | **录制 78 条 → 回放 117 条，进度 100%** |
+| `02_query_timeline` | `Query::ListTopics / GetInfo / FindTopic / ExportRange / GetStateAt` | **4 个 API 全部返回正确结果** |
+| `03_playback_control` | 区间 / 速率 / 进度 / 回调 / `RequestStop` / 自定义 `ISink` | **区间回放 4/8 条，进度 71.3%** |
+| `04_custom_backend` | **`IDdsBackend` / `ISource` / `ISink` 扩展点** | **内存后端完整跑通** |
+
+配套 `examples/cpp/CMakeLists.txt`（独立构建，只需 Stratum 静态库，**不需要 Fast DDS 头**）
+与 `examples/cpp/README.md`（API 分层图、各示例要点、编译说明、**踩坑表**）。
+
+另新增 `examples/README.md` 作为示例总索引（区分 C++ 层与 shell 层）。
+
+### 二、编写过程中暴露并修正的 API 细节
+
+写示例等于对 API 做了一次外部审视 —— 以下都是我一开始写错、编译纠正的：
+
+| 现象 | 真实情况 |
+|---|---|
+| `RtpsBackend is not a member of stratum::protocol` | 它在 **`stratum::protocol::rtps`** |
+| `reference to 'rtps' is ambiguous` | 同时 `using` 了 `stratum` 与 `stratum::protocol` → 用全限定名 |
+| `invalid new-expression of abstract class` | **`ISink::WaitForAcknowledgments` 是纯虚**，容易漏实现 |
+| `BackendConfig::extra` 编译不过 | 它是 **`vector<pair<string,string>>`**，不是 `map` |
+| `RecorderStats does not name a type` | 统计类型是嵌套的 **`Recorder::Stats`** |
+
+这些已写进 `examples/cpp/README.md` 的"踩过的坑"一节。
+
+### 三、顺带修复的真实环境问题
+
+**`build/` 目录被 root 重建**（`drwxr-xr-x root root`），
+导致 `build/tools/` 消失、普通用户无法写入、工具链构建失败。
+
+修复：用 `wsl -u root`（无需密码）执行 `chown -R ubunturoot:ubunturoot build`。
+**记录**：若再次出现"`mkdir: Permission denied`"，优先检查 `build/` 属主。
+
+同时补建了两个此前只在需要时才构建的工具：`fastdds_sub_diag`（`build.sh`）
+与 `fastdds_pub_diag`（`build_pub.sh`）—— 它们不在 `build_tools.sh` 里。
+
+### 四、基线
+
+* `ctest` **34/34**；对账 A **200/200**（缺口 0）。

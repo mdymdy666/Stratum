@@ -76,19 +76,36 @@ cd .. && bash tools/fastdds_sub_diag/scenarios/08_accounting.sh
 #   期望：对账 A 200/200，序号缺口 0
 ```
 
-### 最小示例
+### 示例
 
-四个可直接运行的示例见 [`examples/`](examples/)：
+**两层示例**，按需要选 —— 详见 [`examples/README.md`](examples/README.md)。
 
-| 示例 | 内容 |
+**① C++ 示例（`examples/cpp/`）** —— 给要**把 Stratum 作为库嵌入**的程序员：
+
+| 示例 | 演示的 API |
 |---|---|
-| [`01_hello_pubsub`](examples/01_hello_pubsub/) | 最小发布订阅（Stratum ↔ Fast DDS 互通验证） |
-| [`02_record_replay`](examples/02_record_replay/) | 录制 → 回放 → 校验完整性与时序 |
-| [`03_large_payload`](examples/03_large_payload/) | 大样本自动分片（DATA_FRAG）与重组 |
+| [`01_record_and_replay`](examples/cpp/01_record_and_replay.cc) | `TimelineImplV2` + `RtpsBackend` + `Recorder` + `Query` + `Player` |
+| [`02_query_timeline`](examples/cpp/02_query_timeline.cc) | `Query::ListTopics / GetInfo / FindTopic / ExportRange / GetStateAt` |
+| [`03_playback_control`](examples/cpp/03_playback_control.cc) | 区间 / 速率 / 进度 / 回调 / 中途停止 + 自定义 `ISink` |
+| [`04_custom_backend`](examples/cpp/04_custom_backend.cc) | **扩展点**：`IDdsBackend` / `ISource` / `ISink` |
+
+```bash
+cmake -S . -B build -G Ninja && cmake --build build
+cmake -S examples/cpp -B build-examples -G Ninja && cmake --build build-examples
+./build-examples/04_custom_backend /tmp/tl 8      # 最独立，先看这个
+```
+
+**② Shell 示例（`examples/0x_*/`）** —— 端到端可运行链路：
+
+| 示例 | 验证内容 |
+|---|---|
+| [`01_hello_pubsub`](examples/01_hello_pubsub/) | Stratum ↔ Fast DDS 最小互通 |
+| [`02_record_replay`](examples/02_record_replay/) | 录制 → 回放 → 完整性校验 |
+| [`03_large_payload`](examples/03_large_payload/) | 大样本自动分片（DATA_FRAG） |
 | [`04_cross_host`](examples/04_cross_host/) | 跨主机（NAT + UDP 中继）双向收发 |
 
 ```bash
-bash examples/02_record_replay/run.sh      # 每个示例都是一键脚本
+bash examples/02_record_replay/run.sh
 ```
 
 ---
