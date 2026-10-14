@@ -71,7 +71,7 @@ bash tools/fastdds_sub_diag/build_tools.sh
 ### 运行测试
 
 ```bash
-cd build && ctest            # 期望 34/34
+cd build && ctest            # 期望 37/37
 cd .. && bash tools/fastdds_sub_diag/scenarios/08_accounting.sh
 #   期望：对账 A 200/200，序号缺口 0
 ```
@@ -82,17 +82,19 @@ cd .. && bash tools/fastdds_sub_diag/scenarios/08_accounting.sh
 
 **① C++ 示例（`examples/cpp/`）** —— 给要**把 Stratum 作为库嵌入**的程序员：
 
-| 示例 | 演示的 API |
-|---|---|
-| [`01_record_and_replay`](examples/cpp/01_record_and_replay.cc) | `TimelineImplV2` + `RtpsBackend` + `Recorder` + `Query` + `Player` |
-| [`02_query_timeline`](examples/cpp/02_query_timeline.cc) | `Query::ListTopics / GetInfo / FindTopic / ExportRange / GetStateAt` |
-| [`03_playback_control`](examples/cpp/03_playback_control.cc) | 区间 / 速率 / 进度 / 回调 / 中途停止 + 自定义 `ISink` |
-| [`04_custom_backend`](examples/cpp/04_custom_backend.cc) | **扩展点**：`IDdsBackend` / `ISource` / `ISink` |
+| 模块 | `_demo.cpp`（简单用法，≥100 行） | `_full.cpp`（≥300 行 + 3 个真实场景） |
+|---|---|---|
+| **core** | [`core_demo.cpp`](examples/cpp/core_demo.cpp) 196 行 | [`core_full.cpp`](examples/cpp/core_full.cpp) 468 行 — 产线录制 / 故障复盘 / 回归回放 |
+| **protocol** | [`protocol_demo.cpp`](examples/cpp/protocol_demo.cpp) 291 行 | [`protocol_full.cpp`](examples/cpp/protocol_full.cpp) 917 行 — 非 DDS 数据源 / 自定义去向 / 能力协商 |
+| **storage** | [`storage_demo.cpp`](examples/cpp/storage_demo.cpp) 246 行 | [`storage_full.cpp`](examples/cpp/storage_full.cpp) 580 行 — 100 万键时间轴 / **双引擎契约** / 元数据版本 |
+| **types** | [`types_demo.cpp`](examples/cpp/types_demo.cpp) 348 行 | [`types_full.cpp`](examples/cpp/types_full.cpp) 623 行 — 双时间戳 / 质量报告 / 序列化器降级 |
+| **rtps** | [`rtps_demo.cpp`](examples/cpp/rtps_demo.cpp) 264 行 | [`rtps_full.cpp`](examples/cpp/rtps_full.cpp) 506 行 — 字节级报文 / 发送侧配置 / 端到端 |
 
 ```bash
 cmake -S . -B build -G Ninja && cmake --build build
-cmake -S examples/cpp -B build-examples -G Ninja && cmake --build build-examples
-./build-examples/04_custom_backend /tmp/tl 8      # 最独立，先看这个
+cmake -S examples/cpp -B build-examples -G Ninja   # 将构建 10 个目标
+cmake --build build-examples
+./build-examples/rtps_demo                         # 最独立，先看这个
 ```
 
 **② Shell 示例（`examples/0x_*/`）** —— 端到端可运行链路：
@@ -146,7 +148,7 @@ bash examples/02_record_replay/run.sh
 
 | 类别 | 数量 | 说明 |
 |---|---|---|
-| 单元/集成测试（ctest） | **34** | `ctest` 34/34 |
+| 单元/集成测试（ctest） | **37** | `ctest` 37/37；5 个模块各含**大数据量 / 随机 / 真实场景**三类 |
 | 真实场景脚本 | **28** | 覆盖互通、录制回放、QoS、keyed、崩溃恢复、丢包、跨主机 |
 | 随机测试 | — | `14_random_suite.sh`、`25_cross_host_stress.sh` 内置随机 |
 

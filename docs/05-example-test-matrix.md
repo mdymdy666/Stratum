@@ -29,10 +29,10 @@
 
 | 模块 | `_demo.cpp`（≥100 行） | 行数 | `_full.cpp`（≥300 行） | 行数 | 真实场景数 |
 |---|---|---|---|---|---|
-| **core** | ✅ `core_demo.cpp` | **196** | ✅ `core_full.cpp` | **450** | **3**（产线录制 / 故障复盘 / 回归回放） |
-| **protocol** | ✅ `protocol_demo.cpp` | **291** | ✅ `protocol_full.cpp` | **896** | **3**（非 DDS 数据源 / 自定义去向 / 能力协商） |
+| **core** | ✅ `core_demo.cpp` | **196** | ✅ `core_full.cpp` | **468** | **3**（产线录制 / 故障复盘 / 回归回放） |
+| **protocol** | ✅ `protocol_demo.cpp` | **291** | ✅ `protocol_full.cpp` | **917** | **3**（非 DDS 数据源 / 自定义去向 / 能力协商） |
 | **storage** | ✅ `storage_demo.cpp` | **246** | ✅ `storage_full.cpp` | **580** | **3**（时间轴扫描 100 万键 / 引擎契约 / 元数据版本） |
-| **types** | ✅ `types_demo.cpp` | **348** | ✅ `types_full.cpp` | **625** | **3**（双时间戳 / 质量报告 / 序列化器降级） |
+| **types** | ✅ `types_demo.cpp` | **348** | ✅ `types_full.cpp` | **623** | **3**（双时间戳 / 质量报告 / 序列化器降级） |
 | **rtps** | ✅ `rtps_demo.cpp` | **264** | ✅ `rtps_full.cpp` | **506** | **3**（报文字节级 / 发送侧配置 / 端到端） |
 
 **历史文件**（旧的 4 个示例，内容会被新结构吸收后移除）：
@@ -50,11 +50,11 @@
 
 | 模块 | 大数据量 | 随机 | 真实场景（≥3） |
 |---|---|---|---|
-| **core** | ⬜ | ⬜ | ⬜ |
-| **protocol** | ⬜ | ⬜ | ⬜ |
-| **storage** | 🚧 `tests/stress/test_stress_throughput.cc` | 🚧 `tests/random/test_lsm_v2_random.cc` `tests/random/test_random_ops.cc` | 🚧 `tests/real/test_lsm_v2_real.cc` `tests/real/test_real_sensor_data.cc` |
-| **types** | ⬜ | ⬜ | ⬜ |
-| **rtps** | ⬜ | ⬜ | ⬜ |
+| **core** | ✅ 14 个文件（含 `test_stress_throughput`） | ✅ 2 个（`test_random_ops` 等） | ✅ 14 个 |
+| **protocol** | ✅ `test_protocol_backend.cc` 976 行 | ✅ 4 个种子 | ✅ 3 个（非 DDS 源 / 远端转发 / 能力协商） |
+| **storage** | ✅ 14 个文件 | ✅ 6 个 | ✅ 15 个 |
+| **types** | ✅ `test_types_serializer.cc` 763 行 | ✅ 4 个种子 | ✅ 3 个（PLC 点表 / 录制元数据 / 批量上报） |
+| **rtps** | ✅ `test_rtps_backend_usage.cc` 563 行 | ✅ 4 个种子 | ✅ 3 个（MTU 切片 / 限速窗口 / 过滤与 QoS） |
 
 **已有 ctest（38 个源文件）分类**：
 
