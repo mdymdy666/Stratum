@@ -105,3 +105,6 @@ stratum_add_test(test_submsg_walk rtps/test_submsg_walk.cc rtps)
 
 # 回归：SEDP Publication 构造失败必须显式报错（曾静默跳过 → 对端收不到数据）
 stratum_add_test(test_publication_guard rtps/test_publication_guard.cc rtps)
+
+# types 模块：DynamicValue / TypeDescriptor / ISerializer 契约
+stratum_add_test(test_types_serializer types/test_types_serializer.cc types)
