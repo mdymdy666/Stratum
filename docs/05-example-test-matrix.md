@@ -31,7 +31,7 @@
 |---|---|---|---|---|---|
 | **core** | ✅ `core_demo.cpp` | **196** | ✅ `core_full.cpp` | **450** | **3**（产线录制 / 故障复盘 / 回归回放） |
 | **protocol** | ✅ `protocol_demo.cpp` | **291** | ✅ `protocol_full.cpp` | **896** | **3**（非 DDS 数据源 / 自定义去向 / 能力协商） |
-| **storage** | ✅ `storage_demo.cpp` | **246** | ✅ `storage_full.cpp` | **536** | **3**（时间轴扫描 100 万键 / 引擎契约 / 元数据版本） |
+| **storage** | ✅ `storage_demo.cpp` | **246** | ✅ `storage_full.cpp` | **580** | **3**（时间轴扫描 100 万键 / 引擎契约 / 元数据版本） |
 | **types** | ✅ `types_demo.cpp` | **348** | ✅ `types_full.cpp` | **625** | **3**（双时间戳 / 质量报告 / 序列化器降级） |
 | **rtps** | ✅ `rtps_demo.cpp` | **264** | ✅ `rtps_full.cpp` | **506** | **3**（报文字节级 / 发送侧配置 / 端到端） |
 
@@ -75,6 +75,7 @@
 | 时间 | 完成内容 |
 |---|---|
 | 2026-10-14 12:30 | 建立本矩阵；摸清 5 个模块；确认旧示例行数均不足 300 |
+| 2026-10-14 13:20 | **examples 可重复性修复 + LSM 引擎覆盖**：全部 10 个示例连跑两次均 PASS（修前 core_full 第二次 FAIL 3 项）；storage_full 的契约用例参数化，MemoryEngine 与 LsmEngine 各 21 项全 OK |
 | 2026-10-14 13:35 | **rtps 模块完成**：`rtps_demo.cpp`(264 行)；`rtps_full.cpp`(506 行)三个场景全通过。**examples 覆盖矩阵 5/5 全部完成** |
 | 2026-10-14 13:30 | **types 模块完成**：`types_demo.cpp`(348 行)；`types_full.cpp`(625 行)三个场景全通过。发现 `DynamicValue` 的 MakeXxx 工厂与 ToString 尚未实现（链接时 undefined reference） |
 | 2026-10-14 13:10 | **storage 模块完成**：`storage_demo.cpp`(246 行, 30 项检查全 OK)；`storage_full.cpp`(536 行) 三个场景全通过（100 万键顺序不变量 / 引擎契约 / 元数据版本拒绝） |

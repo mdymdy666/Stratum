@@ -61,6 +61,24 @@ bool EnsureDir(const std::string& dir) {
   return true;
 }
 
+// 清空并重建目录。
+//
+// 【为什么不是 EnsureDir】示例必须**可重复运行**。若只确保目录存在，
+// 第二次运行时目录里还留着上一次的数据，TimelineImplV2::Open 会打开它，
+// 于是"录制了多少条""窗口里有多少条"都跟首次不同，检查项就会误报失败 ——
+// 读者照着跑第二遍会以为是自己环境的问题。
+// （这也是本项目反复出现的主题：验证手段本身不可靠时，结论就不可信。）
+bool ResetDir(const std::string& dir) {
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);   // 目录不存在时也返回成功
+  std::filesystem::create_directories(dir, ec);
+  if (ec && !std::filesystem::exists(dir)) {
+    std::printf("  重建目录失败: %s (%s)\n", dir.c_str(), ec.message().c_str());
+    return false;
+  }
+  return true;
+}
+
 int g_failed = 0;
 
 void Check(bool ok, const char* what) {
@@ -87,7 +105,7 @@ int ScenarioA_ProductionRecording(const std::string& base_dir) {
   std::printf("\n══════ 场景 A：产线传感器长时间录制 ══════\n");
   const std::string dir = base_dir + "/line_a";
 
-  if (!EnsureDir(dir)) { ++g_failed; return 1; }
+  if (!ResetDir(dir)) { ++g_failed; return 1; }
   TimelineImplV2 timeline;
   Status s = timeline.Open(dir);
   if (!s.ok()) {
@@ -195,7 +213,7 @@ int ScenarioB_IncidentReview(const std::string& base_dir) {
   std::printf("\n══════ 场景 B：故障复盘 ══════\n");
   const std::string dir = base_dir + "/incident_b";
 
-  if (!EnsureDir(dir)) { ++g_failed; return 1; }
+  if (!ResetDir(dir)) { ++g_failed; return 1; }
   TimelineImplV2 timeline;
   if (!timeline.Open(dir).ok()) {
     std::printf("  Open 失败: %s\n", dir.c_str());
@@ -330,7 +348,7 @@ int ScenarioC_RegressionReplay(const std::string& base_dir) {
   std::printf("\n══════ 场景 C：回归测试数据回放 ══════\n");
   const std::string dir = base_dir + "/regression_c";
 
-  if (!EnsureDir(dir)) { ++g_failed; return 1; }
+  if (!ResetDir(dir)) { ++g_failed; return 1; }
   TimelineImplV2 timeline;
   if (!timeline.Open(dir).ok()) {
     std::printf("  Open 失败: %s\n", dir.c_str());

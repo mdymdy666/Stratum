@@ -75,6 +75,24 @@ bool EnsureDir(const std::string& dir) {
   return true;
 }
 
+// 清空并重建目录。
+//
+// 【为什么不是 EnsureDir】示例必须**可重复运行**。若只确保目录存在，
+// 第二次运行时目录里还留着上一次的数据，TimelineImplV2::Open 会打开它，
+// 于是"录制了多少条""窗口里有多少条"都跟首次不同，检查项就会误报失败 ——
+// 读者照着跑第二遍会以为是自己环境的问题。
+// （这也是本项目反复出现的主题：验证手段本身不可靠时，结论就不可信。）
+bool ResetDir(const std::string& dir) {
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);   // 目录不存在时也返回成功
+  std::filesystem::create_directories(dir, ec);
+  if (ec && !std::filesystem::exists(dir)) {
+    std::printf("  重建目录失败: %s (%s)\n", dir.c_str(), ec.message().c_str());
+    return false;
+  }
+  return true;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // 场景 A：接入非 DDS 数据源
 //
@@ -325,7 +343,7 @@ class PlcBackend final : public IDdsBackend {
 int ScenarioA_NonDdsSource(const std::string& base) {
   std::printf("\n══════ 场景 A：接入非 DDS 数据源（有界队列 + 背压）══════\n");
   const std::string dir = base + "/scenario_a";
-  if (!EnsureDir(dir)) { ++g_failed; return 1; }
+  if (!ResetDir(dir)) { ++g_failed; return 1; }
 
   TimelineImplV2 timeline;
   Status s = timeline.Open(dir);
@@ -586,7 +604,7 @@ class RemoteBackend final : public IDdsBackend {
 int ScenarioB_RemoteForwarding(const std::string& base) {
   std::printf("\n══════ 场景 B：转发到自定义去向（连接状态 + 重试）══════\n");
   const std::string dir = base + "/scenario_b";
-  if (!EnsureDir(dir)) { ++g_failed; return 1; }
+  if (!ResetDir(dir)) { ++g_failed; return 1; }
 
   TimelineImplV2 timeline;
   if (!timeline.Open(dir).ok()) {

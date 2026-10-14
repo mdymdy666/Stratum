@@ -37,6 +37,7 @@
 #include <string>
 #include <vector>
 
+#include "stratum/storage/lsm/lsm_engine.h"
 #include "stratum/storage/memory/memory_engine.h"
 #include "stratum/storage/meta_codec.h"
 #include "stratum/storage/time_key.h"
@@ -64,6 +65,24 @@ bool EnsureDir(const std::string& d) {
   std::filesystem::create_directories(d, ec);
   if (ec && !std::filesystem::exists(d)) {
     std::printf("    创建目录失败: %s (%s)\n", d.c_str(), ec.message().c_str());
+    return false;
+  }
+  return true;
+}
+
+// 清空并重建目录。
+//
+// 【为什么不是 EnsureDir】示例必须**可重复运行**。若只确保目录存在，
+// 第二次运行时目录里还留着上一次的数据，TimelineImplV2::Open 会打开它，
+// 于是"录制了多少条""窗口里有多少条"都跟首次不同，检查项就会误报失败 ——
+// 读者照着跑第二遍会以为是自己环境的问题。
+// （这也是本项目反复出现的主题：验证手段本身不可靠时，结论就不可信。）
+bool ResetDir(const std::string& dir) {
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);   // 目录不存在时也返回成功
+  std::filesystem::create_directories(dir, ec);
+  if (ec && !std::filesystem::exists(dir)) {
+    std::printf("  重建目录失败: %s (%s)\n", dir.c_str(), ec.message().c_str());
     return false;
   }
   return true;
@@ -246,12 +265,14 @@ int ScenarioA_TimeAxisScanning(const std::string& work) {
 //     否则换后端时会以各种隐蔽方式出错（返回码不同、边界行为不同）
 //   · 这里用同一套用例跑 MemoryEngine，覆盖各类边界
 // ═══════════════════════════════════════════════════════════════════════════
-int ScenarioB_EngineContract(const std::string& work) {
-  std::printf("\n══════ 场景 B：存储引擎契约验证 ══════\n");
-  const std::string dir = work + "/engine_b";
-  if (!EnsureDir(dir)) { ++g_failed; return 1; }
-
-  MemoryEngine engine;
+// 同一套契约用例，跑在任意 IStorageEngine 实现上。
+//
+// 【为什么必须参数化】"任何实现都满足同一套语义"是插件式设计成立的前提。
+// 只跑一个实现等于没验证这条 —— 换后端时的差异（返回码不同、边界行为不同）
+// 会在上层以各种隐蔽方式暴露出来。
+int RunEngineContract(IStorageEngine& engine, const char* label,
+                      const std::string& dir) {
+  std::printf("    \u2500\u2500 引擎: %s \u2500\u2500\n", label);
   Status s = engine.Open(dir);
   Check(s.ok(), "Open 成功");
   if (!s.ok()) { ++g_failed; return 1; }
@@ -385,6 +406,29 @@ int ScenarioB_EngineContract(const std::string& work) {
 
   engine.Close();
   Check(true, "Close 成功");
+  return 0;
+}
+
+int ScenarioB_EngineContract(const std::string& work) {
+  std::printf("\n══════ 场景 B：存储引擎契约验证（多实现）══════\n");
+  std::printf("  同一套用例跑所有 IStorageEngine 实现 —— 这是插件式设计成立的试金石\n");
+
+  const std::string dir_mem = work + "/engine_mem";
+  const std::string dir_lsm = work + "/engine_lsm";
+
+  // 每个引擎在独立目录下运行（LSM 需要真实文件系统）
+  if (!ResetDir(dir_mem)) { ++g_failed; return 1; }
+  {
+    MemoryEngine e;
+    RunEngineContract(e, "MemoryEngine（参考实现）", dir_mem);
+  }
+
+  if (!ResetDir(dir_lsm)) { ++g_failed; return 1; }
+  {
+    LsmEngine e;
+    RunEngineContract(e, "LsmEngine（自研 LSM 实现）", dir_lsm);
+  }
+
   std::printf("  场景 B 完成\n");
   return 0;
 }
@@ -517,7 +561,7 @@ int main(int argc, char** argv) {
   std::printf("╔══════════════════════════════════════════════════════════════╗\n");
   std::printf("║  storage_full：三个真实场景                                   ║\n");
   std::printf("║   A 时间轴扫描（100 万键 / 随机 / 计时 / 顺序不变量）         ║\n");
-  std::printf("║   B 存储引擎契约（含边界与快照）                              ║\n");
+  std::printf("║   B 存储引擎契约（MemoryEngine + LsmEngine 同一套用例）        ║\n");
   std::printf("║   C 元数据版本演进与损坏恢复                                  ║\n");
   std::printf("╚══════════════════════════════════════════════════════════════╝\n");
   std::printf("工作目录: %s\n", work.c_str());

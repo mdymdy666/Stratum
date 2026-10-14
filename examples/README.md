@@ -8,11 +8,11 @@
 |---|---|---|
 | **core** | `core_demo.cpp`（196 行） | `core_full.cpp`（450 行）：产线录制 / 故障复盘 / 回归回放 |
 | **protocol** | `protocol_demo.cpp`（291 行） | `protocol_full.cpp`（896 行）：非 DDS 数据源 / 自定义去向 / 能力协商 |
-| **storage** | `storage_demo.cpp`（246 行） | `storage_full.cpp`（536 行）：100 万键时间轴 / 引擎契约 / 元数据版本 |
+| **storage** | `storage_demo.cpp`（246 行） | `storage_full.cpp`（580 行）：100 万键时间轴 / 引擎契约 / 元数据版本 |
 | **types** | `types_demo.cpp`（348 行） | `types_full.cpp`（625 行）：双时间戳 / 质量报告 / 序列化器降级 |
 | **rtps** | `rtps_demo.cpp`（264 行） | `rtps_full.cpp`（506 行）：字节级报文 / 发送侧配置 / 端到端 |
 
-合计 **demo 1345 行 + full 3013 行，15 个真实场景**，全部编译通过并实测运行。
+合计 **demo 1345 行 + full 3057 行，15 个真实场景**，全部编译通过并实测运行。
 
 共用件：`common/memory_backend.h` —— 内存后端（同时是 `IDdsBackend` 扩展点的
 最小完整实现），让示例不依赖外部 DDS 参与者就能演示 API 本身。

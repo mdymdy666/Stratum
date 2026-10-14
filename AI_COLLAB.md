@@ -5469,3 +5469,64 @@ MakeArray / MakeStruct / ToString`，但用 `nm` 扫遍所有静态库都**找�
 
 转入 **tests 覆盖矩阵**：每个模块补齐
 **大数据量 / 随机 / 真实场景（≥3）** 三类测试，注册到 ctest。
+
+---
+
+## 2026-10-14（续 80）| C++ 示例复核：修可重复性 + 补 LSM 引擎覆盖
+
+用户明确要求"C++ 版本的必须写"，因此本轮做了一次**逐项复核**，
+而不是只看之前的提交记录。复核方式：列出全部 10 个 C++ 示例与行数、
+对照所有对外头文件检查覆盖缺口、用 CMake 产物**连跑两次**。
+
+### 一、复核发现的两个真实缺陷（都已修）
+
+**缺陷 1：示例不可重复运行**
+
+`core_full` 第二次运行失败 3 项（导出窗口非空 / 至少回放出一条 /
+topic_mapping 生效）。根因：场景目录里残留上一次运行的数据，
+`TimelineImplV2::Open` 打开它之后，录制与查询的语义就与首次不同。
+
+这是**严重**问题：读者照着跑第二遍会以为是自己环境的问题。
+
+处置：把场景入口的 `EnsureDir`（只确保存在）换成 `ResetDir`（先清空再建），
+并对 `core_full` / `protocol_full` / `storage_full` 三个会落盘的示例统一处理。
+注释里写清了为什么"只确保存在"不够。
+
+**缺陷 2：LSM 引擎未被任何示例覆盖**
+
+覆盖对照显示 `storage/lsm/lsm_engine.h` 与 `storage/lsm_v2/stratum_db.h`
+**没有被任何示例 include** —— 而 LSM 是项目自研的存储实现，
+`storage_full` 只跑了 `MemoryEngine`。
+
+处置：把场景 B 的契约用例**参数化**为 `RunEngineContract(IStorageEngine&, ...)`，
+然后对 `MemoryEngine` 与 `LsmEngine` 各跑一遍（各自独立目录）。
+结果：**两个实现各 21 项检查全部 OK**。
+这才是契约测试的本意 —— "任何实现都满足同一套语义"这条，
+只跑一个实现等于没验证。
+
+### 二、复核结果（全部 10 个示例连跑两次）
+
+| 示例 | 行数 | 第 1 次 | 第 2 次 |
+|---|---|---|---|
+| core_demo | 196 | PASS | PASS |
+| core_full | 450 | PASS | PASS |
+| protocol_demo | 291 | PASS | PASS |
+| protocol_full | 899 | PASS | PASS |
+| storage_demo | 246 | PASS | PASS |
+| storage_full | 580 | PASS | PASS |
+| types_demo | 348 | PASS | PASS |
+| types_full | 623 | PASS | PASS |
+| rtps_demo | 264 | PASS | PASS |
+| rtps_full | 506 | PASS | PASS |
+
+**不合格示例数 0。** 全部通过 CMake 构建（10/10 目标）。
+
+### 三、本轮又暴露的两个"验证手段"问题
+
+1. **脚本没检查构建退出码**：引号写错导致编译失败，但脚本继续用**旧二进制**
+   跑出了"全部通过"的结论。已改为显式检查 `cmake --build` 的退出码，
+   并打印二进制的 mtime 作为"这确实是本次构建"的证据。
+2. **Python 字符串里的英文双引号直接进了 C++ 字面量**
+   （`这是"插件式"成立`），破坏语法。中文文本里不要用英文引号包中文短语。
+
+这两条与之前记录的五类问题同源：**结论的可靠性取决于验证手段本身是否可靠。**
