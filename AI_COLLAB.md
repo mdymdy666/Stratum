@@ -5165,3 +5165,63 @@ Stratum/参与者**在同一网段活动，值得后续留意；但不影响本�
 ### 四、基线
 
 * `ctest` **34/34**；对账 A **200/200**（缺口 0）。
+
+---
+
+## 2026-10-14（续 74）| 📐 建立覆盖矩阵；core 模块示例完成（demo 196 行 / full 450 行）
+
+### 一、本轮的方针：先有可核查的覆盖矩阵
+
+需求是"**绝不允许漏测**"。要做到这一点，先得有一份能逐项打勾的清单，
+而不是靠"我觉得覆盖了"。因此新增 **`docs/05-example-test-matrix.md`**：
+
+* **模块清单**（5 个，依据 `src/include/stratum/`）：
+  `core` / `protocol` / `storage` / `types` / `rtps`
+  （`src/include/stratum/rtps/**` 的 83 个文件是**移植的 Fast DDS 源码**，
+   不属于对外 API，不为它写示例；其正确性由 `tests/rtps/` 保证）；
+* **examples 矩阵**：每模块 `_demo.cpp`(≥100 行) + `_full.cpp`(≥300 行 + ≥3 真实场景)；
+* **tests 矩阵**：每模块需覆盖**大数据量 / 随机 / 真实场景**三类；
+* **进度记录表**：每轮更新，作为"有没有漏"的凭据。
+
+### 二、共用件：`examples/cpp/common/memory_backend.h`（279 行）
+
+示例若都用 `RtpsBackend`，就必须有另一个 DDS 参与者配合，否则回放时报
+"尚无已发现的对端 Reader"、`published=0`，**反而演示不了被演示的 API**。
+因此抽出一个内存后端：它同时是 **`IDdsBackend` 扩展点的最小完整实现**，
+可直接作为自定义后端的起点。
+
+### 三、core 模块：`core_demo.cpp`（196 行）
+
+覆盖 `TimelineImplV2::Open/Close`、`Recorder::Start/Stop/GetStats`、
+`Query::ListTopics/GetInfo`、`Player::Play/GetProgress`，
+逐 API 注释用途与坑（`extra` 是 vector 不是 map、`Stats` 是嵌套类型、
+回调不得阻塞等）。实测：录制 50 → 回放 50，进度 100%。
+
+### 四、core 模块：`core_full.cpp`（450 行）—— 三个真实场景
+
+| 场景 | 内容 | 检查项 |
+|---|---|---|
+| **A 产线传感器长时间录制** | 2000 条 @2kHz 合成；每 500ms 采样统计（received/recorded/dropped/queue）；容量与落盘策略配置；环形保留点创建/释放；优雅停止后自查 | 6 项全 OK |
+| **B 故障复盘** | 先造 400 条现场数据；`ListTopics`/`FindTopic`（含"不存在话题需明确失败"）；`ExportRange` 取窗口 116 条；**空区间返回空且不报错**（边界语义）；`GetStateAt` 定点状态重建（kFound）；`CountRange` 与摘要一致性核对 | 8 项全 OK |
+| **C 回归测试数据回放** | 区间裁剪到中间 50%；`RequestStop` 协作式取消（模拟 CI 超时）；`topic_mapping` 改名避免污染实时流；发布回调作为断言依据 | 4 项全 OK |
+
+**实测输出**：三个场景全部通过，`0 项失败`。
+
+### 五、本轮暴露并修复的三个问题（都属于"验证手段不可靠"）
+
+1. **`TimelineImplV2::Open` 不递归创建父目录** —— 传 `base/line_a` 这种多级路径
+   且 `base` 不存在时，报的是
+   `LSMengine open failed: NotFound: .../LOCK: No such file or directory`，
+   错误指向 `LOCK` 文件，**极易误判成权限或存储损坏**。
+   示例中加 `EnsureDir()` 解决，并把这条写进注释。
+2. **检查计数器漏加导致"误报通过"** —— 场景里 `Open` 失败时直接 `return 1`，
+   没有 `++g_failed`，于是三个场景全失败却打印"三个场景全部通过"。
+   **这正是"冒烟式验证"的典型形态**：看起来绿，其实什么都没验。已修。
+3. **构建脚本用 `[ -x 目标 ]` 判断编译成功** —— 旧二进制还在时，
+   即使本次编译失败也会报"✅ 编译成功"。改为**先 `rm -f` 再编译**。
+   （同类问题此前已踩过 `ninja: no work to do`，这次换个马甲又出现。）
+
+### 六、下一轮
+
+按矩阵推进：**protocol 模块**（`protocol_demo.cpp` + `protocol_full.cpp`），
+重点是自定义 `IDdsBackend` 的完整用法与三个真实场景。
