@@ -26,6 +26,7 @@
 | [`03-verification-matrix.md`](03-verification-matrix.md) | **验证矩阵**：28 个场景脚本 ↔ 覆盖的问题 ↔ 判据 |
 | [`04-deployment.md`](04-deployment.md) | **部署与跨主机运行手册**：必做系统配置、中继用法、端口公式、环境坑速查 |
 | [`06-test-gaps.md`](06-test-gaps.md) | **测试缺口清单**（审计结果：真缺口 / 间接覆盖 / 死接口；含补法建议） |
+| [`07-cli-design.md`](07-cli-design.md) | **生产级 CLI 设计**（32 个场景，每条含需求来源 + 命令形态 + 延伸） |
 | [`handoff-readme.md`](handoff-readme.md) | 历史：本项目早期的"文档集索引"（已由根 README 取代） |
 
 ---
