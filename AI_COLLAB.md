@@ -5225,3 +5225,56 @@ Stratum/参与者**在同一网段活动，值得后续留意；但不影响本�
 
 按矩阵推进：**protocol 模块**（`protocol_demo.cpp` + `protocol_full.cpp`），
 重点是自定义 `IDdsBackend` 的完整用法与三个真实场景。
+
+---
+
+## 2026-10-14（续 75）| protocol 模块示例完成（demo 291 行 / full 896 行）
+
+### 一、protocol 是框架最重要的扩展点
+
+```
+你的数据源 ──▶ ISource ──┐
+                          ├──▶ IDdsBackend ──▶ Recorder / Player
+你的数据去向 ◀── ISink  ──┘
+```
+学完这两个示例，就能把 Stratum 接到任何数据来源上（MQTT / 串口 / PLC /
+共享内存 / 日志回流 / 自研总线），而 **Recorder 与 Player 一行都不用改**。
+
+### 二、`protocol_demo.cpp`（291 行）
+
+从零实现 `ISource` + `ISink` + `IDdsBackend`，逐接口写明契约与坑：
+* `Start()` 后回调在**你自己的线程**上，且**不得阻塞**；
+* `Publish()` 返回 OK 只表示"已交给后端"，**不保证对端收到**；
+* `ReadyForPublish()` 是给上层的就绪信号（VOLATILE 下匹配前发出的数据对端不索要）；
+* `WaitForAcknowledgments()` 不支持时应返回 `NotSupported`，**不要假装成功**；
+* `BackendConfig::extra` 是 `vector<pair>` 不是 map；
+* `Capabilities` 是 **`IDdsBackend` 的嵌套类型**。
+实测：录制 30 → 回放 30，进度 100%。
+
+### 三、`protocol_full.cpp`（896 行）—— 三个真实场景
+
+| 场景 | 内容 | 关键结果 |
+|---|---|---|
+| **A 接入非 DDS 数据源** | 有界队列（容量 64）+ 三种溢出策略；生产端不限速；消费者模拟真实处理耗时；录制前用 `DiscoveredTopics()` **自检** | 生产尝试 **4000**、入队 **129**、丢弃 **3871**；**守恒式成立** |
+| **B 转发到自定义去向** | `ReadyForPublish()` 由**真实连接状态**驱动；`WaitForAcknowledgments()` 返回有语义的 `Timeout`；注入连接失败与抖动 | 成功 **49** / 失败 **11**；错误路径真实可达；不支持的方向返回 `NotSupported` 而非空指针 |
+| **C 能力协商与优雅降级** | 同一份业务代码面对三种能力组合（完备 / 无序号 / 最小），按能力产出**录制计划与警告** | 3 个用例全过；"无语号"时如实警告**无法检测缺口**，不假装完整 |
+
+### 四、本轮修掉的两个「测试自身不可靠」问题
+
+1. **断言依赖时序 → flaky 测试**
+   场景 A 最初断言"**必须有丢弃发生**"。但消费者够快时不会丢，测试就假失败。
+   正确的不变量是**守恒**：`入队数 + 丢弃数 == 生产尝试数` —— 任何时序都成立。
+   改为守恒式后，把生产端设为不限速让丢弃真实发生（3871 条），
+   断言本身不再依赖时序。**这正是"充分考虑实际场景"的写法。**
+2. **构建脚本覆盖源码 → 改了等于没改**
+   `build_protocol_ex.sh` 里有 `cp .dsh_tmp/protocol_full.cpp examples/cpp/`，
+   于是我"在 WSL 侧改文件"每次都被下一次构建覆盖，反复出现"改了但编译错误行号不变"。
+   **改为直接修改 `.dsh_tmp` 里的源文件**（构建的唯一真源）。
+   这与之前 `ninja: no work to do`、`[ -x 目标 ]` 误判同属一类：
+   **改完必须先自证"改的确实是编译用的那份"。**
+
+### 五、下一轮
+
+`storage` 模块（`storage_demo.cpp` + `storage_full.cpp`），
+重点：`ITimeline` 直接使用、`IStorageEngine` 抽象、时间轴 key 编解码、
+以及 LSM 写入/区间扫描/快照的实现选择对上层的影响。
