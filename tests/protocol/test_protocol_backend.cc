@@ -284,7 +284,12 @@ class BoundedQueue {
           ++evicted_;
           break;
         case Policy::kBlock:
-          not_full_.wait_for(lk, std::chrono::milliseconds(50),
+          // 【等待时间要短】kBlock 的语义是"队列满就等"。
+          // 若调用方**没有消费者**（本测试的循环就是这样），队列永远满，
+          // 每次 Push 都会等满这个超时 —— 50ms × 5000 条 × 3 种子 ≈ 750 秒，
+          // 足以把整个测试套拖成分钟级（这正是它一度表现为"卡住"的原因）。
+          // 2ms 足以表达"阻塞等待"的语义，又不会拖慢测试。
+          not_full_.wait_for(lk, std::chrono::milliseconds(2),
                              [this] { return q_.size() < cap_; });
           if (q_.size() >= cap_) {
             ++rejected_;
@@ -675,7 +680,11 @@ STRATUM_TEST(Protocol, RandomOverflowPolicyConservesCount) {
       std::uniform_int_distribution<uint32_t> n_d(100, 5000);
 
       const size_t cap = cap_d(rng);
-      const uint32_t total = n_d(rng);
+      // 【kBlock 必须用小规模】没有消费者时它会几乎每次都等满超时，
+      // 这是策略定义（阻塞等待）而非缺陷；但用它跑几千条没有意义，
+      // 只会让测试变慢。其余两种策略是 O(1) 丢弃，规模可以大。
+      const bool is_block = (policy == BoundedQueue::Policy::kBlock);
+      const uint32_t total = is_block ? (n_d(rng) % 300) + 1 : n_d(rng);
       BoundedQueue q(cap, policy);
 
       for (uint32_t i = 0; i < total; ++i) {
