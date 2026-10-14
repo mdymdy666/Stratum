@@ -5895,3 +5895,47 @@ case Policy::kBlock:
 * `ctest` **37/37**；对账 A **200/200**（缺口 0）
 * examples 5/5 模块；tests 5/5 模块（三类齐全）
 * GitHub 已同步至 `cdf7feb`（本次文档提交后再次推送）
+
+---
+
+## 2026-10-14（续 88）| 审计"还有哪些测试需要完善"→ `docs/06-test-gaps.md`
+
+用户问"还有哪些 tests 需要完善"。**不能凭印象回答**，因此写了一个审计脚本：
+
+* 提取 `src/include/stratum/**`（排除移植的 `rtps/`）的全部**类名与方法名**
+* 把所有 `tests/**/*.cc` 拼成一份正文
+* 找出**从未出现**的符号
+
+结果：**19 个类 + 86 个方法**从未被任何测试引用。但直接把这个数字当成
+"缺了 86 个测试"是错的 —— 必须逐项核实。核实后分三类：
+
+### 一、真缺口（有实现、示例用过、测试未直接覆盖）—— 7 项
+
+| 优先级 | 项 |
+|---|---|
+| 中高 | `Player` 控制面：`GetProgress` / `IsPlaying` / `RequestStop` + `PlaybackProgress` |
+| 中 | `Query::GetInfo` + `SessionMetadata` |
+| 中 | `MetaCodec` 全部（编解码会话/话题/保留 + `MakeTopicKey`） |
+| 中 | `IStorageEngine` 迭代器的 `SeekToFirst` / `SeekForPrev` / `Prev`（契约只测了正向 `Next`） |
+| 低 | `SplitPolicy`、`Status` 的分类判定、工厂接口 |
+
+### 二、间接覆盖（可接受）—— 5 类
+
+如 `core/timeline_impl.h` 的迭代器类，该头文件被 **6 个测试** include；
+`memtable.h` / `stratum_db.h` / `Snapshot` / `SSTable` 属内部实现细节。
+
+### 三、死接口（应决策，不是补测试）—— 1 处
+
+**`protocol/itransport.h`**：声明了 `ITransport` / `ITransportFactory` /
+`Datagram` / `TransportConfig`，但 `src/` 下**没有任何实现或使用者，
+也没有任何文件 include 它**。建议删除，或在文件头标注"预留接口未实现"。
+
+> 对照：`protocol/idds_backend.h` 的 `IDdsBackend`/`ISource`/`ISink` 是**真在用**的
+> 扩展点（有实现、有测试、有示例），与 `ITransport` 不同。
+
+### 四、另有一处「接口已定、实现未落」
+
+`types/iserializer.h` 的 `DynamicValue::MakeXxx` 工厂与 `ToString` 已声明未实现，
+调用会链接失败。`tests/types/` 的 `KnownGap_*` 用例已显式记录。
+
+完整清单见 `docs/06-test-gaps.md`（含每项的补法建议）。
