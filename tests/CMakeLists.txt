@@ -108,3 +108,6 @@ stratum_add_test(test_publication_guard rtps/test_publication_guard.cc rtps)
 
 # types 模块：DynamicValue / TypeDescriptor / ISerializer 契约
 stratum_add_test(test_types_serializer types/test_types_serializer.cc types)
+
+# protocol 模块：IDdsBackend / ISource / ISink 契约
+stratum_add_test(test_protocol_backend protocol/test_protocol_backend.cc protocol)
