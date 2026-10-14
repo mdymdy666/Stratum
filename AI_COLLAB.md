@@ -5374,3 +5374,62 @@ MakeArray / MakeStruct / ToString`，但用 `nm` 扫遍所有静态库都**找�
 重点：`RtpsBackend` 的使用侧配置（`initial_peers` / `advertised_address` /
 `max_udp_payload` / 发送窗口）、报文构造与解析工具（`rtps_packet_utils.h`）、
 以及 DATA / DATA_FRAG 的字节级行为。
+
+---
+
+## 2026-10-14（续 78）| rtps 模块示例完成 → **examples 覆盖矩阵 5/5 全部完成**
+
+### 一、`rtps_demo.cpp`（264 行，全部通过）
+
+从使用者视角讲清 rtps 只有两件事：**配置**与**报文**。
+
+| 段 | 内容 |
+|---|---|
+| ① | `RtpsWriterConfig` 全字段，每个都注明"不设它会怎样"（尤其 `advertised_address`：不设会回退到 `DetectLocalAddress()`，NAT 拓扑下症状是"发现成功、SEDP 正常、Writer 已匹配，但一条数据都收不到"） |
+| ② | `RtpsReaderConfig`：`topic_filter` / `requested_qos` / `initial_peers` |
+| ③ | `packet::BuildDataPacket`：**字节级验证**——报文 65 字节、`'RTPS'` 魔数、版本 2.4、guidPrefix 原样写入 |
+| ④ | `packet::BuildDataFragPackets`：6000B / 1400 → **5 片**，每片都是完整 RTPS 报文 |
+| ⑤ | 关键常量表：子消息类型、EntityId、QoS 取值、PID、端口公式 |
+
+### 二、`rtps_full.cpp`（506 行）—— 三个真实场景
+
+| 场景 | 内容 | 关键结果 |
+|---|---|---|
+| **A 报文构造的字节级正确性** | **1 万条**随机 payload 逐条校验头/版本/prefix（**2.5 ms**，658 万字节）；**2000 组**随机 payload(1..20000B) × 随机 frag(200..1400B) 校验分片数；边界（空 payload / 恰好一片 / 多一片 / 65000B→47 片）；**4 个种子**重复 | 全部通过；分片数恒等于 `ceil(payload/frag_size)` |
+| **B 发送侧配置对行为的影响** | 真实 `RtpsBackend` 起 Sink；验证 `ReadyForPublish()` 在无对端时**如实为 false**；未就绪时 `Publish` 返回明确状态；60000B 大样本走分片路径；限速与发送窗口可配置；`WaitForAcknowledgments` 返回有语义的 `Timeout` | 全部通过 |
+| **C 端到端** | loopback 上起 Source + Sink；`topic_filter`；`DiscoveredTopics` 语义澄清 | 见下 |
+
+### 三、场景 C 的诚实结论（**没有伪造成功**）
+
+场景 C 中两端**未完成匹配**（`ReadyForPublish` 持续为 false）。原因是
+**同一进程内起两个 Stratum 参与者会争用同一组端口**（`9050+d*10` / `9051+d*10`），
+真正的双端收发需要**两个进程**（如 `scenarios/05_stratum_to_stratum.sh`）。
+
+示例对此的处理是**如实报告**，并写清区分方法：
+* 若 `ReadyForPublish` 一直 false → 环境/拓扑问题（如组播被禁、端口争用）；
+* 若 `ReadyForPublish` 为 true 却收不到 → **实现问题**，需排查。
+
+这正是 `ReadyForPublish` 存在的意义：把"显示已发布、对端收不到"这种静默失败
+变成显式的状态。示例没有把环境限制伪装成通过。
+
+### 四、本轮修掉的问题（第 5 类：断言与 API 语义不符）
+
+**`DiscoveredTopics()` 的语义被误解**：我断言"配了 1 个过滤话题就该返回 1 个"，
+但它返回的是**已经发现到的**话题，不是配置列表。没有对端时为空是**正确行为**。
+已改为如实报告 + 只断言"不超出过滤范围"。
+
+顺带修了两处自己引入的转义错误（Python 里的 `\"` 变成裸引号，破坏了 C++ 字面量）。
+
+### 五、examples 覆盖矩阵：**5/5 完成**
+
+| 模块 | demo | full | 场景数 |
+|---|---|---|---|
+| core | 196 | 450 | 3 |
+| protocol | 291 | 896 | 3 |
+| storage | 246 | 536 | 3 |
+| types | 348 | 625 | 3 |
+| **rtps** | **264** | **506** | **3** |
+| **合计** | **1345** | **3013** | **15** |
+
+全部编译通过并实测运行。**下一步转向 tests 覆盖矩阵**（每模块需覆盖
+大数据量 / 随机 / 真实场景三类）。
