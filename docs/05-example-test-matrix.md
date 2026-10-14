@@ -32,7 +32,7 @@
 | **core** | ✅ `core_demo.cpp` | **196** | ✅ `core_full.cpp` | **450** | **3**（产线录制 / 故障复盘 / 回归回放） |
 | **protocol** | ✅ `protocol_demo.cpp` | **291** | ✅ `protocol_full.cpp` | **896** | **3**（非 DDS 数据源 / 自定义去向 / 能力协商） |
 | **storage** | ✅ `storage_demo.cpp` | **246** | ✅ `storage_full.cpp` | **536** | **3**（时间轴扫描 100 万键 / 引擎契约 / 元数据版本） |
-| **types** | ⬜ `types_demo.cpp` | — | ⬜ `types_full.cpp` | — | 需 ≥3 |
+| **types** | ✅ `types_demo.cpp` | **348** | ✅ `types_full.cpp` | **625** | **3**（双时间戳 / 质量报告 / 序列化器降级） |
 | **rtps** | ⬜ `rtps_demo.cpp` | — | ⬜ `rtps_full.cpp` | — | 需 ≥3 |
 
 **历史文件**（旧的 4 个示例，内容会被新结构吸收后移除）：
@@ -72,6 +72,7 @@
 | 时间 | 完成内容 |
 |---|---|
 | 2026-10-14 12:30 | 建立本矩阵；摸清 5 个模块；确认旧示例行数均不足 300 |
+| 2026-10-14 13:30 | **types 模块完成**：`types_demo.cpp`(348 行)；`types_full.cpp`(625 行)三个场景全通过。发现 `DynamicValue` 的 MakeXxx 工厂与 ToString 尚未实现（链接时 undefined reference） |
 | 2026-10-14 13:10 | **storage 模块完成**：`storage_demo.cpp`(246 行, 30 项检查全 OK)；`storage_full.cpp`(536 行) 三个场景全通过（100 万键顺序不变量 / 引擎契约 / 元数据版本拒绝） |
 | 2026-10-14 12:55 | **protocol 模块完成**：`protocol_demo.cpp`(291 行) 编译+运行通过；`protocol_full.cpp`(896 行) 三个真实场景全通过（宠数守恒 4000=129+3871） |
 | 2026-10-14 12:5x | **core 模块完成**：`core_demo.cpp`(196 行) 编译+运行通过；`core_full.cpp`(450 行) 三个真实场景全通过（15 项检查 0 失败）。新增共用件 `common/memory_backend.h`(279 行) |
