@@ -6108,3 +6108,76 @@ CLI 的价值在"把已有能力兑现"，不在"设计得多完整"。
 
 `--dry-run` 的输出被定义为**稳定文本契约**，可直接作为黄金文件测试 ——
 **这意味着 CLI 的大量设计不需要真跑数据就能被断言。**
+
+---
+
+## 2026-10-14（续 91）| stratum CLI 第一批实现（session / verify / config）
+
+按用户选择"2"（开始实现第一批），先交付**三组命令 + 完整骨架**。
+
+### 一、交付内容
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `src/cli/cli_common.h` | 127 | 退出码 8 级、输出格式、全局选项、三段式错误 |
+| `src/cli/cli_common.cc` | 182 | 上述实现（含 `Status` → 退出码的映射） |
+| `src/cli/main.cc` | 162 | 全局参数解析、子命令分发、`--help`/`--version` |
+| `src/cli/cmd_session.cc` | 292 | `session list` / `session info` |
+| `src/cli/cmd_verify.cc` | 297 | 完整性报告（按 `RC-1~6` 分类） |
+| `src/cli/cmd_config.cc` | 414 | `config validate` / `config explain` |
+
+合计约 **1470 行**，已接入 `src/CMakeLists.txt`（`add_executable(stratum ...)`，
+链接现有的 `stratum_all` INTERFACE 目标）。
+
+### 二、落实了设计里的关键约定（不是"顺便实现"）
+
+* **退出码 8 级**，其中 `4 INTEGRITY`（数据问题）与 `6 ENV`（环境问题）**分开** ——
+  `Status` 到退出码的映射写在 `cli_common.cc`，是本项目环境经验的沉淀
+* **三段式错误**（症状 → 原因 → 动作）：实测输出确认该格式生效
+* **`--format` 未显式给且非 TTY 时自动 JSON** —— 脚本友好
+* **未实现的子命令明确报错**（`CmdNotImplemented`），不静默忽略
+* **`config validate` 严格模式**：未知字段拒绝 —— 实测把 `retention`
+  （应为 `retain`）拦下来了，这正是 `EC-16` 要防的
+* **`config validate` 检查 `schema_version`**：`99` 被拒绝，落实 `FR-S-2`
+* **`config explain` 输出后果而非字面值**：
+  "超过 24 小时的数据会被自动删除"、"磁盘满时删最旧 → ⚠ 复盘时可能发现
+  故障前的数据已被删" —— 这是 `EC-17` 的正面防线
+* **`verify` 按 `RC-1~6` 分类归因**，且区分"本端可改进"与"非本端问题"；
+  `RC-2` 发现延迟明确标注为**估计值**（不假装精确）
+
+### 三、实现过程中踩的三个坑（都值得记录）
+
+1. **三个 `cmd_*.cc` 漏了外层命名空间**
+   我只写了匿名 `namespace {`，忘了 `namespace stratum { namespace cli {`，
+   于是 `CmdSession` 等定义落在**全局命名空间**，链接时报未定义。
+   定位方式：`nm -C cmd_session.cc.o | grep Cmd` 看到符号**没有 `stratum::cli::` 前缀** ——
+   **符号表比错误信息更直接**。
+
+2. **`.o` 是陈旧的，`make` 直接跳过编译**
+   首次链接失败时，日志只有 `Linking` 没有 `Building`。删除
+   `build/src/CMakeFiles/stratum.dir/**/*.o` 后强制重编才看到真实错误。
+   **这正是本项目反复记录的教训："改了代码要先确认改动真进了二进制"。**
+
+3. **`grep -E "error:"` 抓不到 `undefined reference`**
+   链接错误的关键字是 `undefined reference`，不是 `error:`。
+   第一次诊断因此看到空输出，白跑一轮。
+
+### 四、实测结果
+
+```
+$ stratum --version                      → 正常
+$ stratum --help                         → 正常
+$ stratum record                         → 三段式错误 + 退出码 2（明确"未实现"）
+$ stratum --nope session list /tmp       → 未知选项 + 退出码 2
+$ stratum session list /tmp              → 找到 7 个会话（JSON）
+$ stratum config validate ok.yaml        → 通过，退出码 0
+$ stratum config validate bad.yaml       → 未知字段 retention 被拒，退出码 2
+$ stratum config validate ver99.yaml     → schema_version 99 被拒，退出码 2
+$ stratum config explain ok.yaml         → 逐项解释后果
+$ stratum verify <真实会话>               → 报告 + 退出码 0
+```
+
+### 五、下一批
+
+`record` / `play` / `query`（需要与本项目已有的 `RtpsBackend` 接线），
+以及 `prune` / `ctl`（危险命令，必须带设计里的 `--max-delete-bytes` 等保护）。

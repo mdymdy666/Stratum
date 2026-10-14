@@ -128,3 +128,24 @@ target_link_libraries(stratum_rtps_protocol PUBLIC
     stratum_rtps_base
     stratum_core
 )
+
+# ---------------------------------------------------------------------------
+# stratum CLI —— 交付入口
+#
+# 设计依据：docs/07-cli-design.md（做哪些命令、32 场景）
+#           docs/08-cli-spec.md（每条命令的精确参数与语义）
+#           docs/09-cli-scenarios-deep.md（边界与失败行为）
+#
+# 本版本交付 session / verify / config 三组；
+# 其余子命令在 main.cc 中明确报"未实现"（不静默忽略）。
+# ---------------------------------------------------------------------------
+add_executable(stratum
+    cli/main.cc
+    cli/cli_common.cc
+    cli/cmd_session.cc
+    cli/cmd_verify.cc
+    cli/cmd_config.cc
+)
+target_link_libraries(stratum PRIVATE stratum_all)
+set_target_properties(stratum PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
