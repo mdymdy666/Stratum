@@ -5433,3 +5433,39 @@ MakeArray / MakeStruct / ToString`，但用 `nm` 扫遍所有静态库都**找�
 
 全部编译通过并实测运行。**下一步转向 tests 覆盖矩阵**（每模块需覆盖
 大数据量 / 随机 / 真实场景三类）。
+
+---
+
+## 2026-10-14（续 79）| examples 交付可用性：CMake 入口 + 旧示例清理（10/10 构建通过）
+
+### 一、为什么这一轮重要
+
+前五轮把 10 个示例文件写出来了，但**用户拿到仓库仍然不知道怎么构建**：
+原来的 `examples/cpp/CMakeLists.txt` 只列了 4 个已被取代的旧文件。
+"能编译"和"别人能编译"是两件事，本轮补上后者。
+
+### 二、做了什么
+
+| 动作 | 结果 |
+|---|---|
+| 移除被取代的旧示例 | 删除 `01_record_and_replay.cc` / `02_query_timeline.cc` / `03_playback_control.cc` / `04_custom_backend.cc`（内容已并入 `core_*` / `protocol_*`） |
+| 重写 `examples/cpp/CMakeLists.txt` | 列出 **10 个目标**（5 模块 × demo/full），校验源文件存在，`list(LENGTH)` 报告目标数；加 `examples/cpp` 自身到 include 路径以便找到 `common/*.h` |
+| 重写 `examples/README.md` | 10 个示例的表格（含行数与三个场景名）、构建步骤、**建议阅读顺序**、以及"旧示例已移除"的说明 |
+| **用 CMake 真正构建验证** | `cmake -S examples/cpp -B build-examples -G Ninja` → **"将构建 10 个可执行文件"**；`cmake --build` → **[20/20] 全部链接成功**；产物 **10/10** 可执行文件；抽查 `core_demo`（回调 100 条）与 `rtps_demo`（全部通过）均正常 |
+
+`build-*/` 已在 `.gitignore` 中，构建目录不会入库。
+
+### 三、又踩了同一个坑（第 3 次）：内联脚本里的 `$VAR` 失效
+
+本轮第一次尝试用 heredoc 把脚本内联进 `wsl bash -lc`，结果 `$D` / `$SRC`
+全部变成空串 —— 报错是 `cp: cannot stat '/cpp_CMakeLists.txt'`，
+`cmake` 甚至在 `/mnt/e/CodexWorkspace/LearnFastDDS` 下找源目录。
+
+**这与本项目此前记录过的坑完全一致**：`$VAR` / `$(...)` 在多层 shell 传递中会被吃掉。
+处置方式也早已写明：**脚本一律落盘成文件再执行**。
+本次是图省事用了内联写法，教训再次确认 —— 该纪律没有例外。
+
+### 四、下一轮
+
+转入 **tests 覆盖矩阵**：每个模块补齐
+**大数据量 / 随机 / 真实场景（≥3）** 三类测试，注册到 ctest。
