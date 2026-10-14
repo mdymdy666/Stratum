@@ -111,3 +111,6 @@ stratum_add_test(test_types_serializer types/test_types_serializer.cc types)
 
 # protocol 模块：IDdsBackend / ISource / ISink 契约
 stratum_add_test(test_protocol_backend protocol/test_protocol_backend.cc protocol)
+
+# rtps 使用侧：报文构造/分片/配置契约（区别于 tests/rtps/ 的移植代码测试）
+stratum_add_test(test_rtps_backend_usage rtps/test_rtps_backend_usage.cc rtps)
