@@ -159,6 +159,17 @@ int DoInfo(const std::vector<std::string>& args, GlobalOptions g) {
   }
   const std::string target = args[0];
 
+  // 【重要】查询类命令**不得有创建副作用**。
+  // TimelineImplV2::Open() 对不存在的路径会创建会话目录（录制时正需如此），
+  // 若这里不检查，`session info /typo/path` 会"成功"并显示"话题 0 个"，
+  // 使用者会以为"这个会话是空的"，而不是"路径打错了"。
+  if (!SessionExists(target)) {
+    return Fail(kNotFound, "会话不存在: " + target,
+                "路径不存在或不是目录",
+                "用 `stratum session list <父目录>` 列出可用会话；"
+                "注意 session info 不会创建会话");
+  }
+
   TimelineImplV2 timeline;
   Status s = timeline.Open(target);
   if (!s.ok()) {
