@@ -7195,3 +7195,65 @@ JSON -> "has_integrity_issue":false,"pruned_events":200,
 全量 ctest: 42 / 42
 CLI：prune 的三层保护 + verify 的裁剪呈现 —— 这条链路完整闭环
 ```
+
+---
+
+## 2026-10-15（续 105）| 还账：pruned ranges 的自动化测试（13 用例）
+
+### 一、为什么做这个
+
+上一轮打通了 `DeleteRange → ListPrunedRanges → verify 分开呈现` 并端到端实测，
+但**没有自动化测试** —— 我在记录里明确写了这是欠账。本轮还上。
+
+### 二、新增 `tests/unit/test_pruned_ranges.cc`（495 行，13 用例）
+
+要守住的语义按重要性排：
+
+| 优先级 | 语义 | 用例 |
+|---|---|---|
+| **1** | **裁剪不是缺口** —— prune 后"完整性有问题"必须仍为 false | `PruningDoesNotCountAsIntegrityIssue` |
+| 2 | 区间可追溯（删了哪段、多少条） | `SinglePruneIsRecorded` |
+| 3 | 多次裁剪**追加**而非覆盖 | `MultiplePrunesAccumulate` |
+| 4 | 话题间互不影响 | `PerTopicIsolation` |
+| 5 | 裁剪记录**持久化**（重开后仍在） | `SurvivesReopen` |
+
+第 1 条为什么最重要：若它破了，复盘时会得出"录制丢了数据"的错误结论，
+让人去查**并不存在的**问题 —— 这正是这套机制存在的理由。
+
+### 三、三类覆盖
+
+* **大数据量**：连续裁剪 100 次 → 记录 100 个区间、合计 500 条，数值精确
+* **随机（4 种子）**：随机区间，区间数量与条数总和都必须对
+* **真实场景 ×3**：
+  ① 裁剪调试数据后复盘（业务话题完好 + 裁剪可追溯 + 不算缺口）
+  ② 删空后元数据与裁剪记录**都仍在**（FR-R-11 + 审计）
+  ③ 保留点与手工裁剪**共存互不干扰**（两种不同机制）
+
+### 四、两个有意的设计被测试固化下来
+
+* **未注册话题返回空而不是错误**（`UnregisteredTopicReturnsEmptyNotError`）：
+  "没有裁剪记录"是正常状态，不是失败。
+* **空指针返回 `InvalidArgument`**（`NullOutputIsInvalidArgument`）：
+  与 `JsonSerializer` 的处理一致。
+
+### 五、结果
+
+```
+registered cases: 13
+[核心] 删 50 条后 has_integrity_issue 仍为 false，且裁剪记录可追溯
+[规模] 连续裁剪 100 次：记录 100 个区间，合计 500 条
+[场景1] 裁剪 debug 250 条：业务话题仍 500 条，裁剪可追溯且不算缺口
+[场景2] 删空后：元数据仍在（active=0）且裁剪记录仍在
+[场景3] 保留点与手工裁剪共存，互不干扰
+result: 13 passed, 0 failed
+```
+
+**一次编译通过**（`GetQualityStats()` 的字段名判断正确：`dropped_messages` /
+`sequence_gaps`）。
+
+### 六、状态
+
+```
+全量 ctest: 43 / 43
+prune -> verify 这条链路：实现 + 端到端实测 + 自动化测试，三者齐了
+```

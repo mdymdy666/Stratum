@@ -130,3 +130,6 @@ stratum_add_test(test_dynamic_value types/test_dynamic_value.cc types)
 
 # JSON 序列化器 / 工厂 / 降级模式（含两处已知有损的断言）
 stratum_add_test(test_json_serializer types/test_json_serializer.cc types)
+
+# 已裁剪区间的读取与语义（补上"裁剪不是缺口"这条契约的自动化覆盖）
+stratum_add_test(test_pruned_ranges unit/test_pruned_ranges.cc unit storage)
