@@ -136,3 +136,6 @@ stratum_add_test(test_pruned_ranges unit/test_pruned_ranges.cc unit storage)
 
 # 并发注册/追加/查询压力测试（排查 record 段的 core dump）
 stratum_add_test(test_concurrent_register unit/test_concurrent_register.cc unit storage)
+
+# 话题类型定义的存取（核心用例须 ≥2 话题：单话题曾掩盖 return 落进循环体的 bug）
+stratum_add_test(test_topic_type_definition unit/test_topic_type_definition.cc unit storage)
