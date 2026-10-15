@@ -17,6 +17,9 @@
 // 只实现所需的极小子集：`key: value` 与一层缩进嵌套。够用且零依赖。
 
 #include <algorithm>
+#include <unistd.h>
+#include <ctime>
+#include <filesystem>
 #include <cctype>
 #include <fstream>
 #include <map>
@@ -394,6 +397,245 @@ int DoExplain(const std::vector<std::string>& args, GlobalOptions g) {
   return kOk;
 }
 
+// ---------------------------------------------------------------------------
+// 配置编辑锁
+//
+// 直接对接移植模块的文件锁协议：<path>.lock 存在且非空 = 正在编辑。
+// 提供命令的意义：手工 touch / 清空极易出错，且出错后**没有明显症状**
+// （录制器只是不再重载配置）。
+// ---------------------------------------------------------------------------
+
+std::string LockPathOf(const std::string& path) { return path + ".lock"; }
+
+// 读取锁文件内容（空表示未加锁）。返回 false 表示 IO 错误。
+bool ReadLock(const std::string& path, bool* locked, std::string* content,
+              uint64_t* size, std::string* error) {
+  const std::string lp = LockPathOf(path);
+  std::error_code ec;
+  if (!std::filesystem::exists(lp, ec)) {
+    if (locked) *locked = false;
+    if (content) content->clear();
+    if (size) *size = 0;
+    return true;
+  }
+  const auto sz = std::filesystem::file_size(lp, ec);
+  if (ec) {
+    if (error) *error = "无法读取锁文件大小: " + lp + " (" + ec.message() + ")";
+    return false;
+  }
+  if (size) *size = static_cast<uint64_t>(sz);
+  if (locked) *locked = (sz != 0);
+  if (content) {
+    content->clear();
+    if (sz > 0 && sz < 65536) {
+      std::ifstream in(lp);
+      if (in) {
+        std::string line;
+        while (std::getline(in, line)) {
+          *content += line;
+          *content += '\n';
+        }
+      }
+    }
+  }
+  return true;
+}
+
+int DoLock(const std::vector<std::string>& args, GlobalOptions g) {
+  std::string path;
+  std::string reason;
+  std::string ttl;
+  for (size_t i = 0; i < args.size(); ++i) {
+    const std::string& a = args[i];
+    if (a == "--reason") {
+      if (i + 1 >= args.size()) return Fail(kUsage, "--reason 缺少参数值", "", "");
+      reason = args[++i];
+      continue;
+    }
+    if (a == "--ttl") {
+      if (i + 1 >= args.size()) return Fail(kUsage, "--ttl 缺少参数值", "", "");
+      ttl = args[++i];
+      continue;
+    }
+    if (!a.empty() && a[0] == '-') {
+      return Fail(kUsage, "config lock 不支持该选项: " + a,
+                  "支持 --reason 与 --ttl", "");
+    }
+    if (path.empty()) path = a;
+  }
+  if (path.empty()) {
+    return Fail(kUsage, "config lock 需要文件参数", "缺少配置文件路径",
+                "例如: stratum config lock /etc/stratum/record.ini --reason \"改保留窗口\"");
+  }
+
+  bool locked = false;
+  std::string content, err;
+  uint64_t size = 0;
+  if (!ReadLock(path, &locked, &content, &size, &err)) {
+    return Fail(kEnv, "无法检查现有锁: " + path, err, "");
+  }
+  if (locked) {
+    return Fail(kBusy, "配置已被锁定: " + path,
+                "锁文件非空（" + std::to_string(size) + " 字节）",
+                "查看持有者: `stratum config status " + path +
+                    "`；若确认可抢，用 `stratum config unlock " + path + " --force`");
+  }
+
+  // 锁内容写成 JSON，便于 status 回答"谁在什么时候因为什么锁的"
+  std::string body;
+  {
+    std::time_t now = std::time(nullptr);
+    std::tm tmv{};
+    localtime_r(&now, &tmv);
+    char ts[48];
+    std::strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%S", &tmv);
+    char host[256] = {0};
+    if (gethostname(host, sizeof(host) - 1) != 0) host[0] = 0;
+    body = "{\"pid\":";
+    body += std::to_string(static_cast<long long>(getpid()));
+    body += ",\"host\":\"";
+    body += JsonEscape(host);
+    body += "\",\"at\":\"";
+    body += ts;
+    body += "\",\"reason\":\"";
+    body += JsonEscape(reason);
+    body += "\"";
+    if (!ttl.empty()) {
+      body += ",\"ttl\":\"";
+      body += JsonEscape(ttl);
+      body += "\"";
+    }
+    body += "}\n";
+  }
+
+  std::ofstream out(LockPathOf(path), std::ios::out | std::ios::trunc);
+  if (!out) {
+    return Fail(kEnv, "无法创建锁文件: " + LockPathOf(path), "打开文件失败",
+                "检查目录是否存在、是否有写权限");
+  }
+  out << body;
+  out.close();
+
+  if (g.format == Format::kJson) {
+    std::printf("{\"schema_version\":1,\"locked\":true,\"path\":\"%s\","
+                "\"lock_file\":\"%s\",\"bytes\":%zu}\n",
+                JsonEscape(path).c_str(), JsonEscape(LockPathOf(path)).c_str(),
+                body.size());
+  } else if (!g.quiet) {
+    std::printf("已锁定: %s\n", path.c_str());
+    std::printf("  锁文件: %s（%zu 字节）\n", LockPathOf(path).c_str(), body.size());
+    std::printf("  内容:   %s", body.c_str());
+    std::printf("\n  提示: 编辑完成后必须 `stratum config unlock %s`，\n"
+                "        否则录制器会一直跳过重载配置（且没有明显症状）。\n",
+                path.c_str());
+  }
+  return kOk;
+}
+
+int DoUnlock(const std::vector<std::string>& args, GlobalOptions g) {
+  std::string path;
+  bool force = false;
+  for (const auto& a : args) {
+    if (a == "--force" || a == "-f") { force = true; continue; }
+    if (!a.empty() && a[0] == '-') {
+      return Fail(kUsage, "config unlock 不支持该选项: " + a, "支持 --force", "");
+    }
+    if (path.empty()) path = a;
+  }
+  if (path.empty()) {
+    return Fail(kUsage, "config unlock 需要文件参数", "缺少配置文件路径",
+                "例如: stratum config unlock /etc/stratum/record.ini");
+  }
+
+  bool locked = false;
+  std::string content, err;
+  uint64_t size = 0;
+  if (!ReadLock(path, &locked, &content, &size, &err)) {
+    return Fail(kEnv, "无法检查锁状态: " + path, err, "");
+  }
+  if (!locked) {
+    if (g.format == Format::kJson) {
+      std::printf("{\"schema_version\":1,\"locked\":false,\"path\":\"%s\"}\n",
+                  JsonEscape(path).c_str());
+    } else if (!g.quiet) {
+      std::printf("未锁定，无需解锁: %s\n", path.c_str());
+    }
+    return kOk;
+  }
+
+  // 协议要求"清空"而不是"删除"：锁文件保留（便于观察历史），内容截断为 0
+  std::ofstream out(LockPathOf(path), std::ios::out | std::ios::trunc);
+  if (!out) {
+    return Fail(kEnv, "无法清空锁文件: " + LockPathOf(path), "打开文件失败", "");
+  }
+  out.close();
+
+  if (g.format == Format::kJson) {
+    std::printf("{\"schema_version\":1,\"locked\":false,\"path\":\"%s\","
+                "\"was_bytes\":%llu}\n",
+                JsonEscape(path).c_str(), static_cast<unsigned long long>(size));
+  } else if (!g.quiet) {
+    std::printf("已解锁: %s\n", path.c_str());
+    std::printf("  锁文件已清空（保留文件本身，符合协议：非空=锁定）\n");
+    if (!content.empty()) {
+      std::printf("  原持有者信息:\n");
+      std::printf("    %s", content.c_str());
+    }
+  }
+  (void)force;
+  return kOk;
+}
+
+int DoStatus(const std::vector<std::string>& args, GlobalOptions g) {
+  std::string path;
+  for (const auto& a : args) {
+    if (!a.empty() && a[0] == '-') {
+      return Fail(kUsage, "config status 不支持该选项: " + a, "", "");
+    }
+    if (path.empty()) path = a;
+  }
+  if (path.empty()) {
+    return Fail(kUsage, "config status 需要文件参数", "缺少配置文件路径",
+                "例如: stratum config status /etc/stratum/record.ini");
+  }
+
+  std::error_code ec;
+  const bool conf_exists = std::filesystem::exists(path, ec);
+  const bool lock_exists = std::filesystem::exists(LockPathOf(path), ec);
+  bool locked = false;
+  std::string content, err;
+  uint64_t size = 0;
+  if (!ReadLock(path, &locked, &content, &size, &err)) {
+    return Fail(kEnv, "无法检查锁状态: " + path, err, "");
+  }
+
+  if (g.format == Format::kJson) {
+    std::printf("{\"schema_version\":1,\"path\":\"%s\",\"exists\":%s,"
+                "\"lock_file\":\"%s\",\"lock_exists\":%s,\"locked\":%s,"
+                "\"lock_bytes\":%llu}\n",
+                JsonEscape(path).c_str(), conf_exists ? "true" : "false",
+                JsonEscape(LockPathOf(path)).c_str(),
+                lock_exists ? "true" : "false", locked ? "true" : "false",
+                static_cast<unsigned long long>(size));
+  } else {
+    std::printf("配置: %s\n", path.c_str());
+    std::printf("  配置文件存在: %s\n", conf_exists ? "是" : "否");
+    std::printf("  锁文件:       %s\n",
+                lock_exists ? LockPathOf(path).c_str() : "(不存在)");
+    std::printf("  状态:         %s\n",
+                locked ? "**已锁定（正在编辑）**" : "未锁定");
+    if (locked) {
+      std::printf("  锁字节数:     %llu\n", static_cast<unsigned long long>(size));
+      if (!content.empty()) {
+        std::printf("  持有者:       %s", content.c_str());
+      }
+      std::printf("\n  影响: 录制器在锁非空期间会**跳过配置重载**（无告警）。\n");
+      std::printf("  动作: 编辑完成后执行 `stratum config unlock %s`\n", path.c_str());
+    }
+  }
+  return locked ? kBusy : kOk;
+}
+
 }  // namespace
 
 int CmdConfig(const std::vector<std::string>& args, GlobalOptions g) {
@@ -405,8 +647,12 @@ int CmdConfig(const std::vector<std::string>& args, GlobalOptions g) {
   const std::vector<std::string> rest(args.begin() + 1, args.end());
   if (sub == "validate") return DoValidate(rest, g);
   if (sub == "explain") return DoExplain(rest, g);
+  if (sub == "lock") return DoLock(rest, g);
+  if (sub == "unlock") return DoUnlock(rest, g);
+  if (sub == "status") return DoStatus(rest, g);
   if (sub == "init") return CmdNotImplemented("config init");
-  return Fail(kUsage, "未知的 config 子命令: " + sub, "本版本支持 validate / explain",
+  return Fail(kUsage, "未知的 config 子命令: " + sub,
+              "本版本支持 validate / explain / lock / unlock / status",
               "完整设计见 docs/08-cli-spec.md 第 8 节");
 }
 

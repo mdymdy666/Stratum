@@ -6404,3 +6404,72 @@ C++ 源码里字符串跨行 → `missing terminating " character`。
 
 **纪律**：替换文本含反斜杠时，不用 `re.sub` 的替换参数，改用字符串切片
 （`t[:m.start()] + repl + t[m.end():]`）。
+
+---
+
+## 2026-10-15（续 95）| 核实日志 stdout 行为 + 补 config 编辑锁命令
+
+用户提出两个考虑：① 日志模块里 warn/error 是否强制打印 stdout，需要确认；
+② 配置按 `.lock` 文件工作，需要 cmd 指令锁住配置文件。
+
+### 一、"warn/error 强制 stdout"—— 核实结论：**不成立**
+
+查全 `src/logging/log.cpp` / `log.hpp` 与整个 `src/`：
+
+| 检查项 | 结果 |
+|---|---|
+| `log.cpp` 里所有直接输出语句 | 只有 2 处：`StdoutSink::Write`(586) 与 `StderrSink::Write`(599) |
+| sink 是否被自动加入 | `LoggerManager::Get()` **默认只加 `FileSink`**；`if (m_stdout_enabled)` 才加 `StdoutSink`，而该值**默认 false** |
+| `log.cpp:481` | `if (record.level >= Level::Warn) stream->flush();` —— 这是**强制 flush（立即落盘）**，**不是**强制输出到 stdout |
+| 整个 `src/` 的 `std::cout` | **0 处**（除 StdoutSink 自身） |
+
+**判断**：那个印象很可能来自第 481 行的"warn 及以上立即 flush"。
+它是有价值的性能取舍（保证重要日志不因缓冲丢失），**但不影响 stdout 纪律**。
+
+**仍然加了守护测试**：在 `warn` / `error` / `critical` 三种级别与错误路径下，
+断言 `--format csv` 的 stdout 仍只有数据行。**这类风险必须由测试守住，不能靠一次核查。**
+
+### 二、`config lock` / `unlock` / `status`
+
+移植的 config 模块有完整的**跨进程编辑锁协议**：
+锁文件 = `<path>.lock`，判据 = **存在且大小 ≠ 0**；
+`Config::StartWatcher` 在锁非空时拒绝启动，监听期间锁非空则**跳过重载**。
+
+**问题**：项目原先**没有任何命令能操作这个锁** ——
+使用者只能手工 `touch` / 清空，而出错后**没有明显症状**
+（录制器只是静静地不再重载配置）。这正属 `EC-17` 那一类"配错了却不知道"。
+
+新增三条命令：
+
+| 命令 | 行为 | 退出码 |
+|---|---|---|
+| `config lock <file> [--reason txt] [--ttl dur]` | 写**非空 JSON**（pid/host/at/reason/ttl）；已锁则拒绝 | 0 / 7 BUSY |
+| `config unlock <file>` | 锁文件**截断为 0**（不是删除，协议判据是"非空=锁定"）；未锁时幂等 | 0 |
+| `config status <file>` | 报告配置文件与锁状态、持有者、**影响与动作** | 0 / 7 BUSY |
+
+**设计要点**：锁内容写成 JSON 而非单个字节 —— 协议只看大小，
+但 `status` 要能回答"**谁**在**什么时候**因为**什么**锁的"。
+写入 pid/host/时间/原因的成本极低，却能把这类事故变成一眼可见。
+
+### 三、实测
+
+```
+status 未锁                -> 退出码 0
+lock                       -> 105 字节 {"pid":13138,"host":"...","reason":"改保留窗口","ttl":"10m"}
+status 已锁                -> 退出码 7 (BUSY)
+重复 lock                  -> 拒绝 7 (BUSY)
+unlock                     -> 锁文件 0 字节（保留文件）
+status 解锁后              -> 退出码 0
+重复 unlock                -> 幂等
+--- stdout 纪律 ---
+warn / error / critical    -> stdout 均只有 2 行 CSV，首行为表头
+错误路径                   -> stdout 为空
+```
+
+设计文档已同步：`docs/08-cli-spec.md` 新增第 10 节。
+
+### 四、下一步
+
+回到原需求主线：**实现 `record` 命令**（CLI 存在的意义所在，
+也是 `play`/`prune`/`ctl` 的前提）。需接 `RtpsBackend` 并落实
+`docs/08-cli-spec.md` 3.2 节的 `record` 状态机。
