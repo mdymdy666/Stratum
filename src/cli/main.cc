@@ -233,7 +233,8 @@ int main(int argc, char** argv) {
   else if (cmd == "verify") rc = CmdVerify(args, g);
   else if (cmd == "config") rc = CmdConfig(args, g);
   else if (cmd == "record") rc = CmdRecord(args, g);
-  else if (cmd == "play" || cmd == "prune" || cmd == "ctl" ||
+  else if (cmd == "play") rc = CmdPlay(args, g);
+  else if (cmd == "prune" || cmd == "ctl" ||
            cmd == "io" || cmd == "doctor") {
     rc = CmdNotImplemented(cmd);
   } else {

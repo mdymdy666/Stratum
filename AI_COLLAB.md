@@ -6652,3 +6652,93 @@ CLI 现有五组命令: session / query / verify / config / record
 - Python 替换整段文本时因**缩进差异**（实际 2 空格、我写 4 空格）静默失败，
   却打印了成功信息。改为"定位锚点行 + 插入"的方式，并在插入前打印实际内容核对。
   **教训：`str.replace` 未匹配时不报错，必须自己校验结果。**
+
+---
+
+## 2026-10-15（续 98）| 实现 play 命令（闭环的另一半）
+
+### 一、交付
+
+`src/cli/cmd_play.cc`（476 行）+ 声明/注册/CMake 接入。
+
+**已支持**：`--from` / `--to`（含 `@session+5s` 会话内偏移）/ `--topic`（可重复）/
+`--rate` / `--remap src=dst`（可重复）/ `--domain` / `--participant-name` /
+`--advertised-address` / `--initial-peers` / `--discovery-wait` / `--wait-for-ack` /
+`--ack-timeout` / `--no-republish` / `--loop` / `--allow-original-topic-names` /
+`--dry-run` / `--no-stats`
+
+### 二、两个 CLI 层的关键默认值（core 的默认对命令行不安全）
+
+**1. `discovery-wait` 默认 2000ms（core 默认 0）**
+core 的注释里已记录实测：回放器以 RTPS Writer 身份发布，对端需先完成
+SPDP/SEDP 匹配；Open 后立即发数据会被丢弃（"等待 0ms 时对端收到 0 条"）。
+CLI 面向真实使用，直接给安全默认值，而不是把坑留给用户。
+`--dry-run` 里也把这一条讲清楚：
+```
+发现等待: 2000 ms
+  → 对端需要先完成 SPDP/SEDP 匹配；不等会丢数据（实测等 0ms 收到 0 条）
+```
+
+**2. 默认不使用原始话题名**（`allow_original_topic_names = false`）
+这是 EC-18 的防护：回放时若原话题仍在实时发布，下游会同时收到
+"实时数据"和"历史数据"两份且难以分辨。要覆盖必须显式
+`--allow-original-topic-names`，此时 `--dry-run` 会打出**危险**标注。
+
+### 三、"明确不支持"清单（比静默忽略更重要）
+
+有 6 个选项需要 core 层支持，本版本**明确报错并说明原因与替代方案**，
+而不是静默忽略或假装支持：
+
+| 选项 | 为什么暂不支持 |
+|---|---|
+| `--rate-mode compress-gaps` | core 只实现了等比缩放；compress-gaps 需"只压缩超阈值空档" |
+| `--loop-count` | core 未暴露循环轮次，只能无限循环 |
+| `--inject` | 故障注入需在发送路径挂钩子（SC-08） |
+| `--on-finish stay` | 追平后切实时跟随，见 open question Q2 |
+| `--rewrite-ts` | 需 core 支持时间戳重写 |
+| `--require-idle` | 需在启动前探知话题上的活跃发布者 |
+
+每条都给出"动作"，例如：
+```
+错误: --inject 暂不支持
+  原因: 故障注入需要 core 层在发送路径上挂钩子（SC-08）
+  动作: 设计见 docs/07-cli-design.md 场景 S12
+  退出码: 2 (USAGE)
+```
+
+### 四、端到端实测
+
+| 场景 | play 侧 | 订阅端 |
+|---|---|---|
+| 原速（`--rate 1.0`） | `发送窗口: 341 条 / 5.8823 秒 = 58 条/秒`，已发布 341 | `samples=340` |
+| 尽可能快 + 映射（`--rate 0 --remap`） | `341 条 / 0.0044 秒 = 77585 条/秒` | `samples=341`（订阅 `custom/target`） |
+
+* **`--remap` 生效**：订阅端订阅 `custom/target` 收到 341 条
+* **原速时差 1 条**：正是 VOLATILE durability 下首条丢失
+  （core 注释记录过"实测稳定 199/200，缺的恒为首条"）。
+  core 有 `republish_unacked` 补救机制，但需配合 `--wait-for-ack` 才生效 ——
+  这属于**已知行为**，不是缺陷。
+* 订阅端还确认 `incompatible_qos=0`、`rejected=0`、`matched_now=1`
+
+### 五、错误路径全部验证
+
+不存在的会话 → `NOTFOUND(8)`；`--from` 晚于 `--to` → `USAGE(2)` 并提示区间是**半开**；
+`--rate` 为负 / `--remap` 格式错 / 裸时间（无时区）→ 均为 `USAGE(2)` + 三段式动作。
+
+### 六、测试脚本自身的一个坑
+
+第一版测试用 `fastdds_sub_diag --domain=42 --topic=...` 启动订阅端，
+但它其实是**位置参数**：`fastdds_sub_diag [seconds] [domain] [topic]`。
+订阅端因此没起来 —— 而 `play` 的行为是**正确的**：
+```
+[player] 发布失败: NotFound: 尚无已发现的对端 Reader（数据已缓存待补发）
+已发布: 0 条
+```
+它明确报告了"没有对端"，而不是假装发成功。
+
+另外，解析订阅端条数时应看 `samples=` 字段，我第一版正则抓到了
+`[DATA] 第 1 条`，得出错误结论。**教训：解析日志要认准字段名。**
+
+### 七、下一步
+
+按定时任务顺序：`prune` / `ctl`（危险命令，必须先有保护）。
