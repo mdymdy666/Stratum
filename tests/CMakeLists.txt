@@ -127,3 +127,6 @@ stratum_add_test(test_delete_range unit/test_delete_range.cc unit storage)
 
 # DynamicValue 工厂与自描述输出（把 KnownGap 变成已覆盖能力）
 stratum_add_test(test_dynamic_value types/test_dynamic_value.cc types)
+
+# JSON 序列化器 / 工厂 / 降级模式（含两处已知有损的断言）
+stratum_add_test(test_json_serializer types/test_json_serializer.cc types)

@@ -205,6 +205,7 @@ target_link_libraries(stratum_all INTERFACE
 # ---------------------------------------------------------------------------
 add_library(stratum_types STATIC
     src/types/dynamic_value.cc
+    src/types/json_serializer.cc
 )
 target_include_directories(stratum_types PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

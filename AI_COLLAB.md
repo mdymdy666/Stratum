@@ -6974,3 +6974,77 @@ CMake 报了 `Cannot find source file`。改正为 `src/types/dynamic_value.cc`�
   而不是失败 —— 这是降级模式的要求
 * 实现 JSON 自描述类型的编解码
 * 然后让 CLI `query --decode` 能输出结构化数据
+
+---
+
+## 2026-10-15（续 102）| 类型系统第二步：JSON 序列化器 + 降级模式
+
+### 一、交付
+
+* `src/include/stratum/types/json_serializer.h`（105 行）
+* `src/src/types/json_serializer.cc`（395 行，含内置 JSON 递归下降解析器）
+* `tests/types/test_json_serializer.cc`（436 行，**15 用例**）
+
+三个类：
+* `PassthroughSerializer` —— 降级模式的透传实现
+* `JsonSerializer` —— 自描述（`definition_format == "json"`）的编解码
+* `JsonSerializerFactory` / `CreateSerializer` —— 按描述符分发
+
+### 二、最重要的一条：落实接口契约（降级模式必须"不失败"）
+
+`iserializer.h` 的注释早已写明：
+
+> descriptor 可能不含定义（降级模式）——此时应返回一个
+> `supports_deserialization() == false` 的"透传"序列化器，**而不是失败**。
+
+**这条不是形式主义**：Stratum 的 v1 允许"无类型定义"地录制任意 DDS 数据。
+若工厂在这种情况下失败，**整个录制链路会被一个未注册类型打断** ——
+而"能录下来"是第一位的，"能读懂"是第二位的。
+
+实测断言（场景 2）：现场遇到 `vendor/Proprietary` 这种没注册的类型时，
+工厂返回透传序列化器、**没有失败**，录制可以继续；
+尝试解析得到明确提示（"数据仍可按原始字节回放（这是 v1 的降级模式）"），
+而不是含糊的失败。
+
+### 三、两处"已知有损"写成断言，而不是掩盖
+
+**有损 1：`hex:` 前缀与普通字符串冲突**
+无法区分"字节串"与"恰好以 hex: 开头且后续是合法十六进制的字符串"。
+取舍：二进制冒充文本会让人误读，而 JSON 没有字节类型。
+若改为 `{"$bytes": ...}` 可无损，但所有二进制值都会变成嵌套对象，可读性大幅下降。
+**实测**：`"hex:0a0b"` 往返后变成 `kBytes`；而 `"hex:0a0"`（奇数长度）、
+`"hex:zz"`、`"hex:"` 仍保持字符串 —— **冲突面有限，但不是零**。
+
+**有损 2：数字类型靠值范围推断**
+JSON 只有 number。`MakeUInt32(100)` 与 `MakeInt64(42)` 往返后都变成 `kInt32`。
+**但数值本身无损**（这是关键）。
+这不是实现缺陷，是 JSON 格式表达力的限制。
+
+> 把两处有损写成断言，是为了让将来改动时**立刻看到影响面**，
+> 而不是等某个下游发现数据变了型再回头查。
+
+### 四、其他设计点
+
+* **畸形输入一律拒绝并给出位置**（13 种：未闭合对象/数组、缺值、缺冒号、
+  键未加引号、字符串未闭合、非法字面量、尾逗号、未知转义、`\u` 位数不足、
+  未转义控制字符、结尾多余内容…）。消息带"（位置 N）"与附近内容片段 ——
+  **宽容解析会把格式错误变成静默的数据错误**，与项目"不猜"的原则相悖。
+* **随机测试断言幂等**：随机结构序列化 → 反序列化 → 再序列化，
+  两次文本必须**完全相同**。这条比"能解析"更强。
+* **`\uXXXX` 按 UTF-8 编码**（BMP），转义往返测试含非 ASCII 字符。
+
+### 五、踩的坑：`enum class` 不能直接喂给测试框架
+
+`STRATUM_CHECK_EQ` 内部用 `std::ostringstream <<` 输出两侧的值，
+而 `enum class Kind` 没有 `operator<<` → 编译失败。
+
+修正：测试里统一写 `static_cast<int>(x.kind)`。
+（我在多数地方已经这么写了，漏了 4 处。）
+
+### 六、下一步
+
+让 CLI 用上它：`stratum query --decode`。
+* 从会话元数据里取 `type_name` / `type_definition`
+* 用 `CreateSerializer` 建序列化器
+* 按 `supports_deserialization()` 决定：能解就输出结构化 JSON，
+  不能解就**如实标注**"原始字节（无类型定义）" —— 不假装
