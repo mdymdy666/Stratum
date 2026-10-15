@@ -4,6 +4,7 @@
 // TimelineImplV2 实现：ITimeline → StratumDB 适配
 
 #include "stratum/core/timeline_impl_v2.h"
+#include <cstdlib>
 
 #include <algorithm>
 
@@ -665,6 +666,53 @@ Status TimelineImplV2::LoadSessionLocked() {
   // 写入端把"无效"编码为 0，这里还原，避免 0 被当成真实时间戳
   session_start_ns_ = (start == 0) ? kInvalidTimestamp : start;
   session_end_ns_ = (end == 0) ? kInvalidTimestamp : end;
+  return Status::OK();
+}
+
+// 读取该话题上"已被主动裁剪"的区间。
+//
+// 记录格式（由 DeleteRange 追加写入 pruned/<topic_id>）：
+//   每行 "<begin_ns>,<end_ns>,<deleted_events>\n"
+//
+// 【容错策略】单行格式不对时**跳过该行并继续**，而不是整体失败 ——
+// 这条记录是审计用途的旁路信息，不该因为它有损坏就让 verify 无法出报告。
+Status TimelineImplV2::ListPrunedRanges(uint32_t topic_id,
+                                        std::vector<PrunedRange>* out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("ListPrunedRanges 的输出指针为空");
+  }
+  out->clear();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
+
+  const std::string key = std::string("pruned/") + std::to_string(topic_id);
+  std::string raw;
+  Status s = db_->MetaGet(key, &raw);
+  if (!s.ok()) {
+    // 没有裁剪记录不是错误（这个话题从未被 prune 过）
+    return Status::OK();
+  }
+
+  size_t pos = 0;
+  while (pos < raw.size()) {
+    const size_t nl = raw.find('\n', pos);
+    const std::string line =
+        raw.substr(pos, (nl == std::string::npos ? raw.size() : nl) - pos);
+    pos = (nl == std::string::npos) ? raw.size() : nl + 1;
+    if (line.empty()) continue;
+
+    const size_t c1 = line.find(',');
+    const size_t c2 = (c1 == std::string::npos) ? std::string::npos
+                                                : line.find(',', c1 + 1);
+    if (c1 == std::string::npos || c2 == std::string::npos) continue;
+
+    PrunedRange r;
+    r.topic_id = topic_id;
+    r.begin_ns = std::strtoull(line.substr(0, c1).c_str(), nullptr, 10);
+    r.end_ns = std::strtoull(line.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 10);
+    r.deleted_events = std::strtoull(line.substr(c2 + 1).c_str(), nullptr, 10);
+    out->push_back(r);
+  }
   return Status::OK();
 }
 

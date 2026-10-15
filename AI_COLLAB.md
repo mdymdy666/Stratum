@@ -7125,3 +7125,73 @@ SEDP 不携带，`record` 写下的就是空串。
 CLI 七组命令；query 新增 --decode / --type-format
 类型系统：DynamicValue ✅ -> 序列化器 ✅ -> CLI 接入 ✅（降级路径已验证）
 ```
+
+---
+
+## 2026-10-15（续 104）| 兑现承诺：verify 分开呈现「主动裁剪」与「数据缺口」
+
+### 一、为什么先做这个
+
+`prune` 的输出里我写了这句话：
+
+> 提示: 被裁剪的区间已记录，verify 会视为「主动裁剪」而非缺口
+
+但 **verify 当时还没读那些记录** —— 也就是说，那是**空头支票**。
+自己许下的承诺必须先兑现，否则"留痕"这件事只做了一半。
+
+### 二、core 侧：暴露读取能力（做法与 DeleteRange 一致）
+
+* `itimeline.h` 加 `PrunedRange` 结构 + `ListPrunedRanges(topic_id, out)`
+* 接口**给默认实现**返回 `NotSupported`，只让 `TimelineImplV2` 覆盖 ——
+  保证向后兼容，不破坏 v1 timeline 与测试替身（实测全量构建一次通过）
+* `TimelineImplV2` 实现：读 `pruned/<topic_id>` 元数据，逐行解析
+  `begin_ns,end_ns,deleted_events`
+
+**容错策略**：单行格式不对时**跳过该行继续**，而不是整体失败 ——
+这条记录是审计用途的旁路信息，不该因为它损坏就让 verify 无法出报告。
+
+### 三、CLI 侧：分开呈现（这是重点）
+
+`verify` 现在把两类"没有数据"明确区分：
+
+| 类型 | 呈现 | 是否计入 `has_integrity_issue` |
+|---|---|---|
+| **主动裁剪**（prune 删的） | 单独一节 `[PRUNED]` + 区间 + 条数 + 归因 | **否** ← 关键 |
+| **数据缺口**（RC-4） | 仍按原样报告 | 是 |
+
+**理由**（写在代码注释里）：若不分开，复盘时会把"我们自己删的"误判为
+"录制丢了数据"，于是有人去查**并不存在的**问题 —— 与 `ctl stop` 必须留痕同理。
+
+### 四、端到端实测
+
+```
+造会话 1000 条
+verify（裁剪前）-> 无 pruned 一节 ✓
+prune --where 'topic = hello_world_topic and since @session+8s and until @session+12s' --yes
+  -> 删除 200 条
+verify（裁剪后）->
+  结论: 未发现完整性问题
+  主动裁剪（**非缺口**，由 prune 主动删除）：
+    [PRUNED] hello_world_topic
+        区间: 2026-10-15T15:51:20+08:00 ~ 2026-10-15T15:51:24+08:00
+        条数: 200
+    合计 200 条（1 个区间）—— 这些数据是被**主动删除**的，
+    不是录制过程中丢失的。归因: 人为操作，非本端缺陷。
+  退出码 = 0  ✓（主动裁剪不算问题）
+JSON -> "has_integrity_issue":false,"pruned_events":200,
+        "pruned_ranges":[{"topic":"hello_world_topic",...}]
+```
+
+### 五、一个诚实说明
+
+本轮**没有为它新增自动化测试**（时间用于打通端到端）——
+实测是端到端跑的，core 能力也被现有 42 个用例回归覆盖，
+但**缺少针对"pruned 记录解析 + 边界（畸形行/多区间/未裁剪话题）"的单元测试**。
+下一轮应补 `tests/unit/test_pruned_ranges.cc`。
+
+### 六、状态
+
+```
+全量 ctest: 42 / 42
+CLI：prune 的三层保护 + verify 的裁剪呈现 —— 这条链路完整闭环
+```

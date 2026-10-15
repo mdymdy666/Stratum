@@ -74,6 +74,20 @@ using EventIteratorPtr = std::unique_ptr<IEventIterator>;
 // ---------------------------------------------------------------------------
 // 查询结果：某时刻的状态
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 已裁剪区间（"主动删除"的痕迹）
+//
+// 【为什么必须单独记录】prune 删除数据会在时间轴上留下空洞。
+// 若不记录，verify 会把"我们自己删的"报告为"数据丢失"（RC-4），
+// 于是有人去查**并不存在的**录制问题 —— 这与 ctl stop 必须留痕是同一个道理。
+// ---------------------------------------------------------------------------
+struct PrunedRange {
+  uint32_t topic_id = 0;
+  TimestampNs begin_ns = kInvalidTimestamp;
+  TimestampNs end_ns = kInvalidTimestamp;
+  uint64_t deleted_events = 0;
+};
+
 struct StateAtResult {
   enum class Kind : uint8_t {
     kNotFound,   // 该时刻之前没有任何数据
@@ -138,6 +152,21 @@ class ITimeline {
   // 统计某范围内的消息数（不返回内容，用于报告）
   virtual Status CountRange(uint32_t topic_id, const TimeRange& range,
                             uint64_t* count_out) = 0;
+
+  // 列出该话题上"已被主动裁剪"的区间。
+  //
+  // 【与"数据缺口"的区别】这些区间是 prune **主动**删除的，
+  // 不是录制过程中丢失的。verify 必须把两者分开呈现，
+  // 否则复盘时会得出错误结论。
+  //
+  // 默认实现返回 NotSupported，以保持接口向后兼容
+  // （同 DeleteRange 的做法：避免破坏既有实现类与测试替身）。
+  virtual Status ListPrunedRanges(uint32_t topic_id,
+                                  std::vector<PrunedRange>* out) {
+    (void)topic_id;
+    (void)out;
+    return Status::NotSupported("ListPrunedRanges not supported by this timeline");
+  }
 
   // 删除指定话题在 range 内的数据（CLI `prune` 的地基）。
   //

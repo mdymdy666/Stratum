@@ -212,13 +212,62 @@ int CmdVerify(const std::vector<std::string>& args, GlobalOptions g) {
   const std::vector<Finding> findings = Analyze(meta, topics, total_events, total_bytes);
   const bool has_problem = meta.quality.HasIntegrityIssue();
 
+  // ---------------------------------------------------------------------------
+  // 主动裁剪区间（CLI `prune` 留下的痕迹）
+  //
+  // 【为什么必须与"缺口"分开】prune 删除数据会在时间轴上留空洞。
+  // 若不区分，复盘时会把"我们自己删的"当成"录制丢了数据"，
+  // 于是有人去查**并不存在的**问题 —— 与 ctl stop 必须留痕同理。
+  //
+  // 注意：这些区间**不计入** has_integrity_issue。
+  // ---------------------------------------------------------------------------
+  struct PrunedRow {
+    std::string topic;
+    TimestampNs begin_ns;
+    TimestampNs end_ns;
+    uint64_t events;
+  };
+  std::vector<PrunedRow> pruned;
+  uint64_t pruned_events = 0;
+  if (ts.ok()) {
+    Query q2(&timeline);
+    for (const auto& tp : topics) {
+      TopicMetadata tmc;
+      if (!q2.FindTopic(tp.topic_name, &tmc).ok()) continue;
+      std::vector<PrunedRange> ranges;
+      if (timeline.ListPrunedRanges(tmc.topic_id, &ranges).ok()) {
+        for (const auto& r : ranges) {
+          PrunedRow row;
+          row.topic = tp.topic_name;
+          row.begin_ns = r.begin_ns;
+          row.end_ns = r.end_ns;
+          row.events = r.deleted_events;
+          pruned_events += r.deleted_events;
+          pruned.push_back(row);
+        }
+      }
+    }
+  }
+
   if (want_json) {
     std::printf("{\"schema_version\":1,\"session\":\"%s\",", JsonEscape(target).c_str());
     std::printf("\"events\":%llu,\"payload_bytes\":%llu,\"topics\":%zu,",
                 static_cast<unsigned long long>(total_events),
                 static_cast<unsigned long long>(total_bytes), topics.size());
-    std::printf("\"has_integrity_issue\":%s,\"findings\":[",
-                has_problem ? "true" : "false");
+    std::printf("\"has_integrity_issue\":%s,\"pruned_events\":%llu,"
+                "\"pruned_ranges\":[",
+                has_problem ? "true" : "false",
+                static_cast<unsigned long long>(pruned_events));
+    for (size_t i = 0; i < pruned.size(); ++i) {
+      if (i) std::printf(",");
+      std::printf("{\"topic\":\"%s\",\"begin_ns\":%llu,\"end_ns\":%llu,"
+                  "\"events\":%llu}",
+                  JsonEscape(pruned[i].topic).c_str(),
+                  static_cast<unsigned long long>(pruned[i].begin_ns),
+                  static_cast<unsigned long long>(pruned[i].end_ns),
+                  static_cast<unsigned long long>(pruned[i].events));
+    }
+    std::printf("],\"findings\":[");
     for (size_t i = 0; i < findings.size(); ++i) {
       if (i) std::printf(",");
       std::printf("{\"rc\":\"%s\",\"severity\":\"%s\",\"title\":\"%s\","
@@ -256,6 +305,21 @@ int CmdVerify(const std::vector<std::string>& args, GlobalOptions g) {
 
   std::printf("\n结论: %s\n", !has_problem ? "未发现完整性问题"
                                           : "**发现完整性问题（详见下方分类）**");
+
+  // 「主动裁剪」单独成节 —— 它不是问题，是**已知的、故意的**删除。
+  if (!pruned.empty()) {
+    std::printf("\n主动裁剪（**非缺口**，由 prune 主动删除）：\n");
+    for (const auto& r : pruned) {
+      std::printf("  [PRUNED] %s\n", r.topic.c_str());
+      std::printf("      区间: %s ~ %s\n",
+                  r.begin_ns ? FormatRfc3339(r.begin_ns).c_str() : "-",
+                  r.end_ns ? FormatRfc3339(r.end_ns).c_str() : "(到末尾)");
+      std::printf("      条数: %s\n", HumanCount(r.events).c_str());
+    }
+    std::printf("  合计 %s 条（%zu 个区间）—— 这些数据是被**主动删除**的，\n",
+                HumanCount(pruned_events).c_str(), pruned.size());
+    std::printf("  不是录制过程中丢失的。归因: 人为操作，非本端缺陷。\n");
+  }
 
   if (findings.empty()) {
     std::printf("\n  未发现 RC-1~RC-6 中任何一类问题。\n");
