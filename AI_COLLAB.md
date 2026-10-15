@@ -7352,3 +7352,95 @@ CLI 八组命令：session / query / verify / config / record / play / prune / t
 类型系统闭环：DynamicValue -> 序列化器 -> CLI --decode -> types register
 缺少：types register 的自动化测试（CLI 已端到端验证，但没进 ctest）
 ```
+
+---
+
+## 2026-10-15（续 107）| 复现并修复一个真实的并发 use-after-free
+
+### 一、线索
+
+上一轮实测中 `record` 段出现过一次 `dumped core`，复现不出来。
+唯一差异是**并发**（当时两个 `fastdds_pub_diag` 与 record 同时运行）。
+
+### 二、静态审查先定位疑点
+
+`TimelineImplV2` 的方法普遍是这个形态：
+
+```cpp
+Status TimelineImplV2::Xxx(...) {
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");  // ← 锁外读
+  std::lock_guard<std::mutex> lock(mutex_);                              // ← 才加锁
+  ... 使用 db_ ...
+}
+```
+
+而 `Close()` 在持锁状态下**释放 `db_`**。时序：
+
+```
+线程 A: 读到 opened_ == true
+线程 B: Close() 持锁 → 释放 db_ → opened_ = false
+线程 A: 拿到锁 → 使用**已释放的 db_**   → use-after-free → SIGSEGV
+```
+
+### 三、写测试复现（关键一步）
+
+新增 `tests/unit/test_concurrent_register.cc`（299 行，**5 用例**）：
+
+| 用例 | 内容 | 结果 |
+|---|---|---|
+| SameTopicFromManyThreadsIsIdempotent | 16 线程抢注**同一个**话题 | PASS（id 一致） |
+| DistinctTopicsFromManyThreads | 12 线程注册 120 个话题 | PASS（id 全唯一） |
+| MixedRegisterAppendQuery | 写者+读者混合并发 | PASS（1600 条） |
+| **RegisterWhileClosing** | **注册与关闭并发** | **SIGSEGV ✗ 复现！** |
+| LargeScaleManyTopics | 300 话题 / 6000 条并发写入 | PASS |
+
+**第四条稳定复现，退出码 139。** 即"能复现就先写复现测试"这条纪律起了作用 ——
+没有测试，这个 bug 会一直潜伏到生产环境的长期运行中。
+
+### 四、修法：检查必须落在锁内
+
+**为什么 `atomic<bool>` 不够**：竞争不在 bool 的读取本身，而在于
+「检查 `opened_`」与「使用 `db_`」这两步之间**没有原子性**。
+换成原子变量只会消除 TSan 的一个告警，use-after-free 依然存在。
+
+**正确修法**：把 `if (!opened_)` 移到 `lock_guard` **之后**。
+这样 `Close()` 持锁期间其他线程会阻塞等待，拿到锁后看到 `opened_ == false`，
+安全返回 —— 检查与操作真正互斥。
+
+共修正 **3 处**锁外检查（校验：锁前 0 处、锁内 8 处）。
+
+### 五、验证
+
+```
+修复前: RegisterWhileClosing -> SIGSEGV (139)
+修复后: RegisterWhileClosing -> PASS
+        连跑 3 次退出码均为 0
+        5/5 全通过
+```
+
+### 六、方法学（值得记住）
+
+这一轮的价值不只是修了一个 bug，而是**流程**：
+
+1. **从一次偶发崩溃的"差异"入手**（并发 vs 非并发）
+2. **静态审查提出可验证的假设**（`opened_` 锁外读 + `db_` 释放）
+3. **写复现测试**（失败 → 成功，有明确判据）
+4. **按根因修**（不是掩盖症状：`atomic<bool>` 是掩盖，移进锁内才是修）
+5. **验证稳定性**（连跑多次，不只是跑一次）
+
+**一个偶发崩溃，如果没有被当成线索追下去，就只是一个"偶发"。**
+
+### 七、一个更大的判断
+
+这个 bug 的类型值得警惕：**它只在"并发关闭"时出现**。
+而 Stratum 的目标场景是**长期常开**（黑匣子）—— 那种场景下，
+关闭/重启/异常退出会反复发生，正是这类 bug 的高发区。
+
+**结论**：并发正确性应当作为"长期运行入场券"的一部分，
+后续考虑引入 TSan 到 CI（单独构建目录，不污染主 build）。
+
+### 八、状态
+
+```
+全量 ctest: 44 / 44
+```

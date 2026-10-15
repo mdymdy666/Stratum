@@ -146,8 +146,9 @@ Status TimelineImplV2::Close() {
 // ---------------------------------------------------------------------------
 Status TimelineImplV2::RegisterTopic(const TopicMetadata& metadata,
                                      uint32_t* topic_id_out) {
-  if (!opened_) return Status::ShutdownInProgress("timeline not open");
   std::lock_guard<std::mutex> lock(mutex_);
+  // 检查必须在锁内：否则 Close() 并发释放 db_ 会造成 use-after-free（见 test_concurrent_register.cc）
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
 
   auto it = topic_ids_.find(metadata.topic_name);
   if (it != topic_ids_.end()) {
@@ -431,8 +432,9 @@ Status TimelineImplV2::CountRange(uint32_t topic_id, const TimeRange& range,
 // ---------------------------------------------------------------------------
 Status TimelineImplV2::CreateRetentionPoint(TimestampNs at_ns,
                                             uint64_t* point_id_out) {
-  if (!opened_) return Status::ShutdownInProgress("timeline not open");
   std::lock_guard<std::mutex> lock(mutex_);
+  // 检查必须在锁内：否则 Close() 并发释放 db_ 会造成 use-after-free（见 test_concurrent_register.cc）
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
 
   auto point = std::unique_ptr<storage::lsm_v2::RetentionPoint>();
   Status s = db_->CreateRetentionPoint(&point);
@@ -545,8 +547,9 @@ Status TimelineImplV2::RunRetention() {
 // 运维
 // ---------------------------------------------------------------------------
 Status TimelineImplV2::Flush() {
-  if (!opened_) return Status::ShutdownInProgress("timeline not open");
   std::lock_guard<std::mutex> lock(mutex_);
+  // 检查必须在锁内：否则 Close() 并发释放 db_ 会造成 use-after-free（见 test_concurrent_register.cc）
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
   Status s = db_->Flush();
   if (!s.ok()) {
     return s;

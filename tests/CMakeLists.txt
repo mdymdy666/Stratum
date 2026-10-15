@@ -133,3 +133,6 @@ stratum_add_test(test_json_serializer types/test_json_serializer.cc types)
 
 # 已裁剪区间的读取与语义（补上"裁剪不是缺口"这条契约的自动化覆盖）
 stratum_add_test(test_pruned_ranges unit/test_pruned_ranges.cc unit storage)
+
+# 并发注册/追加/查询压力测试（排查 record 段的 core dump）
+stratum_add_test(test_concurrent_register unit/test_concurrent_register.cc unit storage)
