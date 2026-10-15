@@ -114,3 +114,7 @@ stratum_add_test(test_protocol_backend protocol/test_protocol_backend.cc protoco
 
 # rtps 使用侧：报文构造/分片/配置契约（区别于 tests/rtps/ 的移植代码测试）
 stratum_add_test(test_rtps_backend_usage rtps/test_rtps_backend_usage.cc rtps)
+
+# 移植模块：日志（logging）+ 配置（config）
+# 来源 /UserData/CodexWorkSpace/Go2Cpp，见 docs/10-porting-notes.md
+stratum_add_test(test_log_config unit/test_log_config.cc unit config)

@@ -149,3 +149,45 @@ add_executable(stratum
 target_link_libraries(stratum PRIVATE stratum_all)
 set_target_properties(stratum PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+# ---------------------------------------------------------------------------
+# 日志模块（移植自 /UserData/CodexWorkSpace/Go2Cpp，见 docs/10-porting-notes.md）
+#
+# 【为什么移植】原项目已有成熟实现：LogFilter -> LogItemWorker -> LogFormatter
+# -> LogSink 四层可替换，支持轮转文件、级别过滤、模式化格式，且**零第三方依赖**。
+# 自己重写一遍日志是纯粹的浪费。
+#
+# 移植改动：命名空间 go2cpp::log -> stratum::log；宏 GO2CPP_LOG_* -> STRATUM_LOG_*。
+# ---------------------------------------------------------------------------
+add_library(stratum_logging STATIC
+    logging/log.cpp
+)
+target_include_directories(stratum_logging PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(stratum_logging PUBLIC pthread)
+
+# ---------------------------------------------------------------------------
+# 配置模块（同上移植）
+#
+# 保留：IniFile（INI 解析）、ValueCodec（类型转换）、ConfigVarBase / ConfigVar
+#       （可监听变量）、Config（两阶段事务 + 热更新 + 校验器/监听器）
+# 裁剪：RuntimeConfig 与 BindRuntimeConfig —— 它们绑定 Go2Cpp 的调度器，
+#       而 Stratum 没有调度器。裁掉后本模块零外部依赖。
+# ---------------------------------------------------------------------------
+add_library(stratum_config STATIC
+    config/config.cpp
+)
+target_include_directories(stratum_config PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(stratum_config PUBLIC
+    stratum_logging
+    pthread
+)
+
+# 并入汇总库，使 CLI 与测试可直接使用
+target_link_libraries(stratum_all INTERFACE
+    stratum_logging
+    stratum_config
+)

@@ -6181,3 +6181,96 @@ $ stratum verify <真实会话>               → 报告 + 退出码 0
 
 `record` / `play` / `query`（需要与本项目已有的 `RtpsBackend` 接线），
 以及 `prune` / `ctl`（危险命令，必须带设计里的 `--max-delete-bytes` 等保护）。
+
+---
+
+## 2026-10-15（续 92）| 移植 Go2Cpp 的日志与配置模块
+
+用户指示："WSL 里有现成的日志和配置模块，改个名字移植在本项目，加速开发
+（/UserData/CodexWorkSpace/Go2Cpp）"。这与项目既有的**移植优先**策略一致
+（同 `design/09-rtps-porting-strategy.md`）。
+
+### 一、先摸清源项目，再决定移植面
+
+不假设、不凭印象。用脚本查清：
+
+| 模块 | 依赖情况 | 结论 |
+|---|---|---|
+| **日志** `logging/log.hpp` + `log.cpp` | **只依赖标准库**，与 config 零耦合；`fiber_id` 只是字段名，不依赖协程 | ✅ 整体移植 |
+| **配置** `config/config.hpp` + `config.cpp` | `IniFile`/`ValueCodec`/`ConfigVar`/`Config` **不依赖调度器**（仅注释提及）；`RuntimeConfig` 绑定调度器，`config.cpp` 里 scheduler 出现 **105 处** | ⚠️ 裁掉 5 个函数 |
+
+### 二、移植内容
+
+**合计 2779 行**（日志 1534 + 配置 1245），6 个文件。
+
+**改名映射**：`go2cpp::log/config` → `stratum::log/config`；
+`GO2CPP_LOG_*` → `STRATUM_LOG_*`（8 个宏）；`go2cpp.ini` → `stratum.ini`。
+
+**裁剪的 5 个函数**（都依赖 Go2Cpp 的 M/P/G 调度器，Stratum 没有调度器）：
+`RuntimeConfig::FromIni` / `Validate` / `ApplyLogging`、`LoadRuntimeConfig`、
+`BindRuntimeConfig`。
+
+**保留**（配置模块的精华）：`IniFile`（INI 解析）、`ValueCodec`
+（含 `string`/`bool`/`log::Level`/`vector<T>` 特化）、`ConfigVarBase`/`ConfigVar<T>`、
+`Config`（**两阶段事务、热更新、校验器/监听器**）。
+
+### 三、顺带补上一个合规缺口
+
+排查许可时发现：项目许可为 Apache-2.0，却**没有任何第三方声明文件**，
+而 `third_party/` 是空的 —— 但项目实际移植了 Fast DDS（Apache-2.0）、
+参考了 LevelDB（BSD-3-Clause）、并迁入 LSMengine。
+
+新增 **`THIRD_PARTY_NOTICES.md`**（141 行）：逐项声明来源、版权、许可、
+移植范围与位置；收录 Go2Cpp 的完整 MIT 文本（MIT 要求
+"在所有副本中包含版权声明与许可声明"，**这不是可选项**）。
+6 个移植文件头部也加了来源标注（保留上游版权行），README 许可段同步补充。
+
+### 四、踩的四个坑
+
+1. **裁剪过度，把必需的 `IniFile::Has` 一起删了**
+   第一版用"从 `RuntimeConfig` 处向前找空行"定位函数起点，而 `IniFile::Has`
+   紧邻其前（原 397 行 vs 412 行），被一起删掉。
+   **症状是静态库编译通过、链接测试时才报 undefined**。
+   → **教训：能编译 ≠ 裁剪正确**。第二版改为按函数签名精确定位，
+   并在删除后**显式打印保留函数清单**核对。
+
+2. **裁剪破坏头文件守卫**：给用 `#pragma once` 的 `config.hpp` 末尾硬加了
+   `#endif`，报 `#endif without #if`。
+
+3. **`wsl bash -lc` 吃变量（第 5 次）**：`wsl bash -lc 'D=/path; grep "$D/..."'`
+   里的 `$D` 被外层吃掉，`grep` 收到 `/tests/CMakeLists.txt`。
+   纪律再次确认：**涉及变量的命令一律写脚本文件**。
+
+4. **测试自己成了瓶颈**：大数据量日志测试的等待循环是 `2000 次 × sleep(10ms)`，
+   **每次 `ReadAll` 整个 6MB 文件**，报出"落盘耗时 91125 ms" ——
+   这个数字主要花在测试读文件上，不是日志慢。
+   改为固定观察窗 `12 × 250ms` 后，测试从 **38 秒降到 3.6 秒**。
+
+### 五、测试与实测数据
+
+新增 `tests/unit/test_log_config.cc`（489 行，**16 个用例**），三类覆盖齐全：
+
+* **大数据量**：10 万条日志、5000 键的 INI
+* **随机**：4 种子随机键值 INI、3 种子 × 3000 次数值往返
+* **真实场景 3 个**：配置驱动日志行为 / 配置校验拒绝非法值 / 轮转文件
+
+```
+[规模] 写 100000 条：入队 86.8 ms（≈115 万条/秒，且不阻塞调用方）
+[规模] 观察窗结束时未落盘 5 条（占 0.0050%）—— 如实打印，不做"一条不丢"的假断言
+[规模] 解析 5000 键的 INI：1.07 ms
+结果: 16 passed, 0 failed（3.6 秒）
+全量 ctest: 38 / 38 通过（21.88 秒），既有 37 个测试无回归
+```
+
+**断言口径是刻意设计的**：断言"入队不阻塞"（这是选该库的真正原因）+
+"落盘 ≥99.9% 且如实打印缺口"，而不是写"跑满 200 MB/s"这类漂亮但无意义的断言。
+
+### 六、当前状态与下一步
+
+移植的两个模块**已并入 `stratum_all`**，CLI 与测试均可直接使用，但**尚未接入 CLI**：
+
+| 模块 | 计划接入点 |
+|---|---|
+| 日志 | CLI 的 `--verbose` / `--log-format json` / `--log-file`（当前只记录参数未生效） |
+| 配置 | `config validate/explain` 换成完整的 `IniFile`（当前是自写极简解析器）；`record --config` 用 `Config` 热更新 |
+| 结合 | `Config` 的 `log.*` 变量直接驱动 `LoggerManager` → "改配置即改日志行为" |

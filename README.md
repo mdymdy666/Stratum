@@ -229,3 +229,7 @@ Stratum/
 ## 许可
 
 [Apache License 2.0](LICENSE)。各源文件头部含 `SPDX-License-Identifier: Apache-2.0`。
+
+本项目部分代码移植自上游项目（Fast DDS / LSMengine / LevelDB 设计参考 / Go2Cpp），
+各自的来源、许可与移植范围见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
+**移植文件头部保留了上游版权声明**，这是许可合规要求，请勿删除。
