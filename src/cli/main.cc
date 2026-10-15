@@ -238,7 +238,8 @@ int main(int argc, char** argv) {
   else if (cmd == "types") rc = CmdTypes(args, g);
   else if (cmd == "ctl") rc = CmdCtl(args, g);
   else if (cmd == "io") rc = CmdIo(args, g);
-  else if (cmd == "doctor") {
+  else if (cmd == "doctor") rc = CmdDoctor(args, g);
+  else if (false) {
     rc = CmdNotImplemented(cmd);
   } else {
     rc = Fail(kUsage, "未知子命令: " + cmd, "该子命令不在规范内",
