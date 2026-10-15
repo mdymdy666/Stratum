@@ -235,6 +235,7 @@ int main(int argc, char** argv) {
   else if (cmd == "record") rc = CmdRecord(args, g);
   else if (cmd == "play") rc = CmdPlay(args, g);
   else if (cmd == "prune") rc = CmdPrune(args, g);
+  else if (cmd == "types") rc = CmdTypes(args, g);
   else if (cmd == "ctl" || cmd == "io" || cmd == "doctor") {
     rc = CmdNotImplemented(cmd);
   } else {

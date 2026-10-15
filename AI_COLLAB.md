@@ -7257,3 +7257,98 @@ result: 13 passed, 0 failed
 全量 ctest: 43 / 43
 prune -> verify 这条链路：实现 + 端到端实测 + 自动化测试，三者齐了
 ```
+
+---
+
+## 2026-10-15（续 106）| `types register`：真解码路径打通
+
+### 一、先查出一个更深的原因
+
+上一轮 `query --decode` 的 242 条全走降级，我以为是"上游没给类型定义"。
+本轮调研发现**还有一层**：
+
+```
+stratum_db.cc:RegisterTopic
+    batch.Put(kMetaTopicPrefix + meta.topic_name,
+              EncodeTopicMeta(id, meta.type_name));   // 只有 id 和 type_name
+```
+
+**`type_definition` 根本没进存储。** 而 `query --decode` 走的
+`FindTopic` → `StratumDB` 路径，所以那些字节**永远拿不到定义**。
+即：不是"上游没给"，而是"**给了也无处落**"。
+
+### 二、裁决：用独立 key，不动既有编码
+
+不改 `EncodeTopicMeta` 的格式（会牵动版本兼容），改用独立 meta key
+`typedef/<topic_name>` —— 与 `pruned/` 同一手法，该手法已在 prune/verify 链路验证过。
+
+新增：
+* `ITimeline::SetTopicTypeDefinition` / `GetTopicTypeDefinition`
+  （**默认实现返回 NotSupported**，保持向后兼容 —— 同 `DeleteRange` 的做法）
+* `TimelineImplV2` 覆盖实现
+* `LoadTopicsLocked` 读回定义并填充到 `topic_meta_`（**逐话题、在循环内**）
+* CLI `src/cli/cmd_types.cc`（353 行）：`register` / `list` / `show`
+
+### 三、效果（关键验证）
+
+```
+注册前:  "decoded":false,"reason":"no_type_definition"
+注册后:  "decoded":false,"reason":"decode_failed"     ← ★
+```
+
+**`reason` 的变化证明了三件事**：定义被写入、被读回、且解码被**真正尝试**了。
+（实际负载是 CDR 编码的 HelloWorld，不是 JSON，所以解析必然失败 ——
+但"失败"和"压根没试"是两回事，这正是我设计四种解码情形的价值。）
+
+`types register` 的其它行为实测：
+* 非法 JSON 定义 → 明确报错（含解析位置）
+* 类型名不存在 → `NOTFOUND(8)` + **列出会话里实际存在的类型名**
+* 不存在的会话 → `NOTFOUND(8)` 且**不创建目录**
+* `--from -` 从 stdin 读 ✓
+* 重开后定义仍在（持久化）✓
+* 未裁剪/未注册话题的边界行为 ✓
+
+### 四、★ 本轮最重要的教训：搬移代码块必须用括号计数
+
+我为了把"读回定义"放进 `LoadTopicsLocked`，**连踩三次**：
+
+| 尝试 | 做法 | 结果 |
+|---|---|---|
+| 1 | `awk '/^}$/'` 定位函数结尾 | 匹配到**内层** `}` → 代码插到 `return` **之后** → **死代码**（`types list` 能读、`query --decode` 读不到） |
+| 2 | 按行号搬移 [sup..sup_end] | `for` 的闭合 `}` 被留在了 `return` 之后 → **`return` 落进循环体内**，第一次迭代就返回 |
+| 3 | "相邻行是 `    }`"匹配 | `return` 前有个空行 → 匹配落空，**脚本却报"已修正"** |
+
+**最终解法**：用**括号计数**确定函数范围，再整体重写函数体。
+
+**两条要记住的**：
+1. **搬移代码块不能靠文本模式猜范围** —— 必须计数括号（或用 AST）。
+2. **"脚本报成功"不等于改对了** —— 每次替换后都要**独立校验结构**
+   （第 3 次就是校验条件写错才报的假成功）。
+
+### 五、单话题测试掩盖了 bug —— 两话题才暴露
+
+尝试 2 的错误（`return` 在 `for` 内）在**单话题**会话上**完全看不出来**
+（第一次迭代就是唯一一次）。改用**两个话题**验证才发现：
+
+```
+multi/a  -> "reason":"decode_failed"   ✓
+multi/b  -> "reason":"decode_failed"   ✓   （两个都对才算修好）
+```
+
+**教训**：涉及"逐项遍历"的逻辑，测试数据必须**≥2 项**。
+
+### 六、一个待查的异常
+
+测试中 `record` 段曾出现一次 core dump（`timeout: the monitored command
+dumped core`），复现时未再出现。两次的差异：出问题那次是**两个发布者
+同时运行**。已记录，待后续专项排查 —— 不排除是并发注册时的竞争。
+（下一轮优先查这个，可能涉及 `RegisterTopic` 的并发路径。）
+
+### 七、状态
+
+```
+全量 ctest: 43 / 43
+CLI 八组命令：session / query / verify / config / record / play / prune / types
+类型系统闭环：DynamicValue -> 序列化器 -> CLI --decode -> types register
+缺少：types register 的自动化测试（CLI 已端到端验证，但没进 ctest）
+```

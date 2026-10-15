@@ -153,6 +153,29 @@ class ITimeline {
   virtual Status CountRange(uint32_t topic_id, const TimeRange& range,
                             uint64_t* count_out) = 0;
 
+  // 设置/读取话题的类型定义（CLI `types register` 的地基）。
+  //
+  // 【为什么需要它】DDS 的 SEDP 不保证携带类型定义，record 写下的
+  // type_definition 常为空（见 docs/03 的 Q11）。没有类型定义就无法把
+  // 原始字节解成结构化数据 —— 于是 `query --decode` 只能走降级路径。
+  //
+  // 本接口让用户**显式注册**一个自描述定义，从而把真解码路径打通：
+  //   stratum types register <type_name> --from <json 文件> --session <会话>
+  //
+  // 默认实现返回 NotSupported，保持接口向后兼容（同 DeleteRange 的做法）。
+  virtual Status SetTopicTypeDefinition(const std::string& topic_name,
+                                        const std::string& definition) {
+    (void)topic_name;
+    (void)definition;
+    return Status::NotSupported("SetTopicTypeDefinition not supported");
+  }
+  virtual Status GetTopicTypeDefinition(const std::string& topic_name,
+                                        std::string* definition) {
+    (void)topic_name;
+    (void)definition;
+    return Status::NotSupported("GetTopicTypeDefinition not supported");
+  }
+
   // 列出该话题上"已被主动裁剪"的区间。
   //
   // 【与"数据缺口"的区别】这些区间是 prune **主动**删除的，

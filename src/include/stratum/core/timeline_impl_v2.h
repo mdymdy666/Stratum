@@ -74,6 +74,10 @@ class TimelineImplV2 : public ITimeline {
                      uint64_t* deleted_bytes = nullptr) override;
   Status ListPrunedRanges(uint32_t topic_id,
                          std::vector<PrunedRange>* out) override;
+  Status SetTopicTypeDefinition(const std::string& topic_name,
+                               const std::string& definition) override;
+  Status GetTopicTypeDefinition(const std::string& topic_name,
+                               std::string* definition) override;
 
   Status CreateRetentionPoint(TimestampNs at_ns,
                               uint64_t* point_id_out) override;

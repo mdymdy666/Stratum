@@ -194,6 +194,17 @@ Status TimelineImplV2::LoadTopicsLocked() {
             .ok()) {
       DecodeStat(raw, &m);
     }
+    // 【补充】把已注册的类型定义读回内存视图（放在循环内，逐话题查）。
+    //
+    // 为什么必须做：StratumDB 的话题元数据只编码了 (id, type_name)，
+    // type_definition 走独立 key `typedef/<topic_name>`。若不合并，
+    // ListTopics / FindTopicByName 返回的 type_definition 恒为空，
+    // `query --decode` 于是永远走降级路径 —— 即使 types register 成功了。
+    std::string def;
+    if (db_->MetaGet(std::string("typedef/") + t.topic_name, &def).ok() &&
+        !def.empty()) {
+      m.type_definition = def;
+    }
     topic_meta_[t.topic_id] = m;
   }
   return Status::OK();
@@ -667,6 +678,47 @@ Status TimelineImplV2::LoadSessionLocked() {
   session_start_ns_ = (start == 0) ? kInvalidTimestamp : start;
   session_end_ns_ = (end == 0) ? kInvalidTimestamp : end;
   return Status::OK();
+}
+
+// 类型定义的存取。
+//
+// key 格式：`typedef/<topic_name>`（独立于话题元数据的既有编码，
+// 避免改动存储格式带来的版本兼容问题 —— 与 pruned/ 同一手法）。
+Status TimelineImplV2::SetTopicTypeDefinition(const std::string& topic_name,
+                                              const std::string& definition) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
+
+  auto it = topic_ids_.find(topic_name);
+  if (it == topic_ids_.end()) {
+    return Status::NotFound("话题未注册: " + topic_name +
+                            "（类型定义只能挂在已存在的话题上）");
+  }
+  Status s = db_->MetaPut(std::string("typedef/") + topic_name, definition);
+  if (!s.ok()) return s;
+
+  // 同步内存视图，使同进程内的后续查询立刻可见
+  auto mit = topic_meta_.find(it->second);
+  if (mit != topic_meta_.end()) {
+    mit->second.type_definition = definition;
+  }
+  return Status::OK();
+}
+
+Status TimelineImplV2::GetTopicTypeDefinition(const std::string& topic_name,
+                                              std::string* definition) {
+  if (definition == nullptr) {
+    return Status::InvalidArgument("GetTopicTypeDefinition 的输出指针为空");
+  }
+  definition->clear();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
+
+  auto it = topic_ids_.find(topic_name);
+  if (it == topic_ids_.end()) {
+    return Status::NotFound("话题未注册: " + topic_name);
+  }
+  return db_->MetaGet(std::string("typedef/") + topic_name, definition);
 }
 
 // 读取该话题上"已被主动裁剪"的区间。
