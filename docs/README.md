@@ -30,6 +30,7 @@
 | [`08-cli-spec.md`](08-cli-spec.md) | **CLI 参数级规范**：通用参数、选择器 BNF、各命令完整参数、状态机、锁与并发矩阵 |
 | [`09-cli-scenarios-deep.md`](09-cli-scenarios-deep.md) | **32 场景再发散**：边界分支 / 失败模式 / 场景交互，回收 18 条新约束 |
 | [`11-type-system.md`](11-type-system.md) | **类型系统的决策与已知边界**：定义格式选型（简化自描述）、两处已知有损、元数据独立 key 约定、端到端链路现状 |
+| [`12-roadmap.md`](12-roadmap.md) | **进度快照与下一步任务**：当前状态、已完成清单、用户期望（eBPF/topic 动态检测）及评估、三层下一步任务、遗留问题、方法学纪律 |
 | [`handoff-readme.md`](handoff-readme.md) | 历史：本项目早期的"文档集索引"（已由根 README 取代） |
 
 ---
