@@ -6354,3 +6354,53 @@ test_log_config: 16 passed
 CLI 现有四组命令：`session` / `query` / `verify` / `config`。
 下一批：`record` / `play`（需与 `RtpsBackend` 接线），
 以及 `config` 换用移植的完整 `IniFile`（当前是自写的极简解析器）。
+
+---
+
+## 2026-10-15（续 94）| JSON 日志改用自定义 Formatter（用上移植模块的扩展点）
+
+### 一、问题
+
+`--log-format json` 输出里出现字面量占位符：`{"ts":"{time}","level":"INFO",...}`。
+
+### 二、定位过程（两次都猜错，最后靠查注册表）
+
+1. **第一次猜测**：以为 `{time}` 未被实现 → 查 `PatternFormatter::add(...)` 注册表，
+   确实没有 `time`。
+2. **第二次观察**：但 text 模式**实测有时间输出**
+   （`2026-10-15 13:39:04.941 [INFO] ...`）→ 说明 `{time}` **是**可用的。
+3. **真正根因**：`PatternFormatter` 的占位符语法就是 `{name}`，
+   而 **JSON 本身也用花括号** —— 两者冲突，整个模式的解析失败，
+   于是所有占位符都被原样保留。且 `LogRecord` 里本就有 `timestamp_ms`。
+
+### 三、正解：用扩展点，而不是绕开
+
+移植的日志模块是 `Filter → Worker → Formatter → Sink` **四层可替换**设计，
+`LogFormatter` 是抽象基类（`virtual Format(const LogRecord&) const = 0`）。
+因此写一个 `JsonLogFormatter` 直接构造 JSON，完全绕开占位符语法：
+
+```cpp
+class JsonLogFormatter final : public log::LogFormatter {
+  std::string Format(const log::LogRecord& r) const override { ... }
+};
+```
+
+实测输出：
+
+```json
+{"ts":"2026-10-15T13:41:20.123+08:00","level":"INFO","logger":"stratum",
+ "file":"...cli_common.cc","line":170,"thread":12345,"msg":"..."}
+```
+
+**这正好验证了移植的价值**：如果要自己写日志，就不会有"换个 Formatter 就行"
+这种改法。同时 `InitLogging` 改为手工装配 `LogItemWorker`
+（`LoggerManager::Configure` 只接受 pattern 字符串，无法注入自定义 Formatter）。
+
+### 四、顺带踩的一个 Python 坑
+
+用 `re.sub(pattern, repl, s)` 时，**repl 会被做转义处理**（`\n` → 换行）。
+我的替换文本里含 C++ 的 `"\n"` 字面量，结果被写成了真实换行，
+C++ 源码里字符串跨行 → `missing terminating " character`。
+
+**纪律**：替换文本含反斜杠时，不用 `re.sub` 的替换参数，改用字符串切片
+（`t[:m.start()] + repl + t[m.end():]`）。

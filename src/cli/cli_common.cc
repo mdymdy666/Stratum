@@ -107,60 +107,110 @@ log::Level LevelFromVerbose(int verbose) {
 }
 
 std::string PatternFor(const std::string& format) {
-  if (format == "json") {
-    // JSON lines：便于被日志采集器抓取（NFR-5 可观测性）
-    //
-    // 【为什么是 elapse_s 而不是时间戳】
-    // 移植的 PatternFormatter 实际只注册了
-    //   m p N e E f l t F c / logger level message thread fiber
-    //   elapse thread_name file line function
-    // **没有 time**（尽管头文件注释声称支持 {time}，属上游缺陷）。
-    // {elapse} 是进程启动以来的秒数，因此字段如实命名为 elapse_s —— 不假装它是
-    // wall-clock 时间戳。需要绝对时间请用默认的 text 格式（由 sink 侧提供）。
-    // 不带时间字段：采集器（journald/loki/filebeat）本就会补采集时间戳，
-    // 而本模块没有可用的 wall-clock 占位符（见上）。宁可不带，也不输出
-    // 字面量 `{time}` 或语义可疑的"运行秒数"。
-    return "{\"level\":\"{level}\",\"logger\":\"{logger}\","
-           "\"file\":\"{file}\",\"line\":{line},"
-           "\"msg\":\"{message}\"}\n";
-  }
+  (void)format;
+  // 仅用于 text 模式。
+  //
+  // 【为什么 JSON 不走这里】PatternFormatter 的占位符语法是 {name}，
+  // 而 JSON 本身也用花括号 —— 两者冲突，实测 JSON 模式下占位符会被原样输出。
+  // 因此 JSON 走自定义的 JsonLogFormatter（见下），绕开语法冲突。
   return "{time} [{level}] {logger} ({file}:{line}) {message}\n";
 }
+
+// ---------------------------------------------------------------------------
+// JSON Lines 日志格式化器
+//
+// 直接用 LogRecord 的字段构造 JSON，不经过占位符解析，因而没有语法冲突。
+// 时间字段用 record.timestamp_ms（Unix 毫秒）转成 RFC3339。
+//
+// 【这正好用上了移植模块的设计价值】LogFormatter 是抽象基类，
+// Filter -> Worker -> Formatter -> Sink 四层都可替换 —— 我们只替换了 Formatter。
+// ---------------------------------------------------------------------------
+class JsonLogFormatter final : public log::LogFormatter {
+ public:
+  std::string Format(const log::LogRecord& r) const override {
+    std::string out;
+    out.reserve(r.message.size() + 192);
+    out += "{\"ts\":\"";
+    out += Rfc3339FromMs(r.timestamp_ms);
+    out += "\",\"level\":\"";
+    out += log::ToString(r.level);
+    out += "\",\"logger\":\"";
+    out += JsonEscape(r.logger);
+    out += "\",\"file\":\"";
+    out += JsonEscape(r.file);
+    out += "\",\"line\":";
+    out += std::to_string(r.line);
+    out += ",\"thread\":";
+    out += std::to_string(r.thread_id);
+    out += ",\"msg\":\"";
+    out += JsonEscape(r.message);
+    out += "\"}\n";
+    return out;
+  }
+
+ private:
+  static std::string Rfc3339FromMs(uint64_t ms) {
+    if (ms == 0) return {};
+    const std::time_t sec = static_cast<std::time_t>(ms / 1000ULL);
+    std::tm tmv{};
+    localtime_r(&sec, &tmv);
+    char base[48];
+    std::strftime(base, sizeof(base), "%Y-%m-%dT%H:%M:%S", &tmv);
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s.%03u%+03d:%02d", base,
+                  static_cast<unsigned>(ms % 1000ULL),
+                  static_cast<int>(tmv.tm_gmtoff / 3600),
+                  static_cast<int>((tmv.tm_gmtoff % 3600) / 60));
+    return buf;
+  }
+};
 
 }  // namespace
 
 void InitLogging(const GlobalOptions& g) {
   const log::Level level = LevelFromVerbose(g.verbose);
-  const std::string pattern = PatternFor(g.log_format);
+  auto& mgr = log::LoggerManager::Instance();
 
+  // 选择 Sink。**stdout 永远不是候选** —— CLI 的数据出口必须干净。
+  std::vector<log::LogSink::ptr> sinks;
   if (g.log_file == "-") {
-    // 显式要求 stderr。**依然不碰 stdout** —— CLI 的数据出口必须干净。
-    auto logger = log::LoggerManager::Instance().Get("stratum");
-    logger->SetLevel(level);
-    std::vector<log::LogItemWorker::ptr> workers;
+    sinks.push_back(std::make_shared<log::StderrSink>());
+  } else {
+    std::string dir = LogDirectory();
+    std::string file = "stratum.log";
+    if (!g.log_file.empty()) {
+      std::filesystem::path p(g.log_file);
+      if (p.has_parent_path()) dir = p.parent_path().string();
+      file = p.filename().string();
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    // 轮转：长期常开场景下日志自己也会把磁盘写满（与 EC-11 同类风险）
+    sinks.push_back(std::make_shared<log::RotatingFileSink>(
+        (std::filesystem::path(dir) / file).string(),
+        10 * 1024 * 1024, /*max_files=*/3));
+  }
+
+  // 选择 Formatter
+  log::LogFormatter::ptr formatter;
+  if (g.log_format == "json") {
+    formatter = std::make_shared<JsonLogFormatter>();
+  } else {
+    formatter = std::make_shared<log::PatternFormatter>(PatternFor(g.log_format));
+  }
+
+  // 手工装配：LoggerManager::Configure 只接受 pattern 字符串，无法注入自定义
+  // Formatter，因此直接用扩展点组装 LogItemWorker。
+  std::vector<log::LogItemWorker::ptr> workers;
+  for (const auto& sink : sinks) {
     workers.push_back(std::make_shared<log::LogItemWorker>(
-        std::make_shared<log::MinimumLevelFilter>(level),
-        std::make_shared<log::PatternFormatter>(pattern),
-        std::make_shared<log::StderrSink>()));
-    logger->ConfigureDefaults(std::move(workers));
-    return;
+        std::make_shared<log::MinimumLevelFilter>(level), formatter, sink));
   }
 
-  // 默认写文件。目录不存在时创建（否则 FileSink 打开失败，日志静默消失）。
-  std::string dir = LogDirectory();
-  std::string file = "stratum.log";
-  if (!g.log_file.empty()) {
-    std::filesystem::path p(g.log_file);
-    if (p.has_parent_path()) dir = p.parent_path().string();
-    file = p.filename().string();
-  }
-  std::error_code ec;
-  std::filesystem::create_directories(dir, ec);
-
-  log::LoggerManager::Instance().Configure(level, /*stdout_enabled=*/false,
-                                           dir, file, pattern);
+  auto logger = mgr.Get("stratum");
+  logger->SetLevel(level);
+  logger->ConfigureDefaults(std::move(workers));
 }
-
 log::Logger::ptr CliLogger() {
   return log::LoggerManager::Instance().Get("stratum");
 }

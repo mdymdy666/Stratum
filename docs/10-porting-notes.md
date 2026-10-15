@@ -224,7 +224,10 @@ diff -u /UserData/CodexWorkSpace/Go2Cpp/src/logging/log.cpp \
 
 * **症状**：模式里写 `{time}` 会**原样输出字面量** `{time}`（未识别项按文档说明原样保留）。
 
-* **CLI 的规避**：`--log-format json` **不带时间字段**。
+* **CLI 的正解**：`--log-format json` 改用**自定义 `JsonLogFormatter`**（继承 `log::LogFormatter`）。
+  这既避开了语法冲突，又用上了移植模块「Filter → Worker → Formatter → Sink 四层可替换」的设计价值。
+  实测 JSON 输出带真实时间戳 `"ts":"2026-10-15T13:41:20.123+08:00"`。
+* **初版规避方案（已废弃）**：曾尝试不带时间字段。
   原因：`{elapse}` 同样不会被替换（实测输出字面量 `{elapse}`），
   说明本模块没有可用的 wall-clock 占位符。
   而 JSON 日志的消费者（journald / loki / filebeat）本来就会补采集时间戳，
