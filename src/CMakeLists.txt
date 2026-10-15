@@ -147,6 +147,7 @@ add_executable(stratum
     cli/cmd_prune.cc
     cli/cmd_types.cc
     cli/cmd_ctl.cc
+    cli/cmd_io.cc
     cli/cmd_record.cc
     cli/cmd_query.cc
     cli/cmd_verify.cc

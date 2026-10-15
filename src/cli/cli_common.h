@@ -176,6 +176,7 @@ int CmdPlay(const std::vector<std::string>& args, GlobalOptions g);
 int CmdPrune(const std::vector<std::string>& args, GlobalOptions g);
 int CmdTypes(const std::vector<std::string>& args, GlobalOptions g);
 int CmdCtl(const std::vector<std::string>& args, GlobalOptions g);
+int CmdIo(const std::vector<std::string>& args, GlobalOptions g);
 
 // 尚未实现的子命令（明确报错，不静默）
 int CmdNotImplemented(const std::string& name);
