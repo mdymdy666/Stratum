@@ -7569,3 +7569,79 @@ ctl status               -> 控制事件 1 条 ✓
 全量 ctest: 45 / 45
 CLI 九组命令：session / query / verify / config / record / play / prune / types / ctl
 ```
+
+---
+
+## 2026-10-15（续 110）| 把 TSan 纳入验证流程（并解决 WSL 下的坑）
+
+### 一、动机
+
+上一轮修复的那个 use-after-free **只在并发关闭时出现**，普通构建"跑一次通过"
+完全不能说明问题 —— 它是靠"偶发崩溃 → 静态审查 → 写复现测试"才抓到的。
+这种运气不可复用。
+
+**结论：并发正确性不能靠"跑一次没崩"来验证，必须上 TSan。**
+
+### 二、WSL 下的坑（已解决，值得记下来）
+
+直接跑 TSan 会立刻失败：
+
+```
+FATAL: ThreadSanitizer: unexpected memory mapping 0x...
+```
+
+**原因**：WSL 内核（`6.6.87.2-microsoft-standard-WSL2`）的 ASLR 随机位宽
+（`vm.mmap_rnd_bits`，通常为 32）与 TSan 的 shadow memory 布局假设冲突。
+
+网上常见的解法是 `sudo sysctl vm.mmap_rnd_bits=28` —— 但这要改内核参数、
+要 root，在共享环境里不合适。
+
+**更干净的解法**：`setarch -R`（只对当前进程禁用 ASLR，无需 root）：
+
+```bash
+setarch "$(uname -m)" -R ./build-tsan/tests/test_concurrent_register
+```
+
+### 三、结果：零竞争告警
+
+用 `setarch -R` 跑通后：
+
+```
+[关闭竞争] 20 轮注册与关闭并发，未崩溃
+[PASS] Concurrent.RegisterWhileClosing
+[规模] 300 话题 / 6000 条，全部并发写入成功
+result: 5 passed, 0 failed
+竞争告警: 0 条
+```
+
+**这印证了上一轮的修复是彻底的** —— 不只是"这次没崩"，而是 TSan 也找不到竞争。
+
+### 四、固化为可复用脚本
+
+新增 `tools/run_tsan.sh`：
+* 固定使用 **`build-tsan`** 独立目录，**不污染主 build**
+* 自动处理 `setarch -R`
+* 逐个测试运行并**统计竞争告警条数**，结尾给出明确结论与退出码
+  （2 = 有竞争，1 = 运行失败，0 = 干净）
+* 默认跑 `test_concurrent_register` / `test_pruned_ranges` /
+  `test_topic_type_definition`
+
+用法：
+```bash
+bash tools/run_tsan.sh                       # 默认目标
+bash tools/run_tsan.sh test_xxx [test_yyy]   # 指定测试
+```
+
+### 五、一个附带说明
+
+同时试过 ASan 兜底（`build-asan`，`-fsanitize=address`），
+但链接阶段失败（`ld returned 1 exit status`，环境问题）。
+既然 TSan 已经给出干净结论，就没有继续纠缠 ——
+**不为工具本身花超过它价值的成本**。已删除 `build-asan` 目录。
+
+### 六、状态
+
+```
+全量 ctest: 45 / 45（主 build 不受影响）
+新增: tools/run_tsan.sh
+```
