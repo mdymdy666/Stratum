@@ -7701,3 +7701,60 @@ bash tools/run_tsan.sh test_concurrent_register
   -> 无 "integer expression expected"
   -> ✅ test_concurrent_register: 通过，零竞争告警
 ```
+
+---
+
+## 2026-10-15（续 112）| 还清 ctl 测试欠账 + 修正一个我虚构的文档引用
+
+### 一、ctl 的自动化测试（14 用例，一次通过）
+
+`tests/unit/test_control_events.cc`。重点覆盖**格式契约**：
+
+* **逗号与换行必须被转义** —— 存储格式是每行 `at_ns,action,reason,detail`，
+  reason 里若含逗号/换行会**破坏行格式**（轻则字段错位，重则一条读成两条）。
+  实测：含 `,`、`\n`、`\r` 的理由被替换为空格，记录条数不变、字段不串位。
+* **累积与顺序** —— 200 条连续记录全部保留且顺序正确（审计需要完整序列）。
+* **随机内容刻意混入逗号与换行**（最易破坏格式的字符），4 种子下记录条数
+  必须与写入一致 —— 换行若未转义，一条会被读成多条。
+* 边界：空 action → `InvalidArgument`、空指针 → `InvalidArgument`、
+  未 Open → `ShutdownInProgress`。
+* 真实场景 ×3：① 记录停止理由（数据不受影响）② pruned/typedef/control_events
+  三个独立 key 共存 ③ 完整审计序列（start/set/snapshot/stop…）重开后仍逐条还原。
+
+```
+result: 14 passed, 0 failed
+```
+
+### 二、★ 修正一个我虚构的文档引用（重要）
+
+盘点时发现：**`docs/03-open-questions.md` 根本不存在**，
+而「Q4 · 类型定义格式」这个编号也是我臆想的。
+
+实际是：
+* `docs/03` = `03-verification-matrix.md`（验证矩阵）
+* 遗留问题清单 = `docs/02-open-issues.md`，编号是 **O1/O2/…**（不是 Q1/Q2）
+* 全 docs 里搜不到一个 "Q4"
+
+**问题在于这个虚构引用已经写进了定时任务 prompt**，会影响后续轮次的判断。
+
+**修正方式**：新建 **`docs/11-type-system.md`**，把**真实**做的决策写下来：
+1. **定义格式选型**：选定「简化自描述（JSON）」，含**为什么**、**放弃了什么**
+   （不与 DDS 生态直接互通 / 表达力有限 / 不是标准）、
+   **将来接 XTypes 的路径**（加一个格式分支即可，不需重构）
+2. **两处已知有损**（bytes 的 hex 前缀冲突、数字类型靠值范围推断）
+3. **元数据的独立 key 约定** —— 把已复用三次的模式（`pruned/` `typedef/`
+   `control_events`）固化成约定
+4. **端到端链路现状图**（含四种解码情形）
+
+并加进 `docs/README.md` 的索引。
+
+**教训**：引用文档前必须**核对它存在**，不要凭记忆编号。
+这与之前那条"校验自身也会错"是同一类问题 ——
+**我对自己记忆的信任度必须低于对实际文件系统的核对。**
+
+### 三、状态
+
+```
+全量 ctest: 46 / 46
+CLI 九组命令；ctl 测试已补齐（欠账清零）
+```

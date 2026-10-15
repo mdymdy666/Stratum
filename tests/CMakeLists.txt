@@ -139,3 +139,6 @@ stratum_add_test(test_concurrent_register unit/test_concurrent_register.cc unit 
 
 # 话题类型定义的存取（核心用例须 ≥2 话题：单话题曾掩盖 return 落进循环体的 bug）
 stratum_add_test(test_topic_type_definition unit/test_topic_type_definition.cc unit storage)
+
+# 控制事件的存取（校准：逗号/换行必须被转义，否则会破坏行格式）
+stratum_add_test(test_control_events unit/test_control_events.cc unit storage)
