@@ -121,3 +121,6 @@ stratum_add_test(test_log_config unit/test_log_config.cc unit config)
 
 # 会话元数据的持久化与重载（曾因 Open 缺 LoadSession 导致 verify 假阳性）
 stratum_add_test(test_session_metadata unit/test_session_metadata.cc unit storage)
+
+# DeleteRange：CLI prune 的地基（删除是唯一不可逆操作，必须有回归）
+stratum_add_test(test_delete_range unit/test_delete_range.cc unit storage)

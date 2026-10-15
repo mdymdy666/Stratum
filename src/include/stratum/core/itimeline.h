@@ -139,6 +139,32 @@ class ITimeline {
   virtual Status CountRange(uint32_t topic_id, const TimeRange& range,
                             uint64_t* count_out) = 0;
 
+  // 删除指定话题在 range 内的数据（CLI `prune` 的地基）。
+  //
+  // 【为什么需要】底三层（IStorageEngine / StratumDB / LsmEngine）都已具备
+  // DeleteRange 能力，但此前没有从 ITimeline 暴露，因此无法按条件裁剪。
+  //
+  // 【与 RunRetention 的区别】RunRetention 是**自动淘汰**，受"保留点保护"
+  // 约束（保留点之前的数据不被淘汰）；DeleteRange 是用户**显式**删除，
+  // 不受该约束 —— 用户说删就该删。但实现会记录 pruned 区间，使决策可追溯。
+  //
+  // 【关键语义】删除会在时间轴上留下**空洞**，而这是**主动行为**，
+  // 必须能与"数据丢失"区分：否则 verify 会误报缺口（RC-4），
+  // 让人去查不存在的录制问题。实现须同时记录 pruned 区间。
+  //
+  // 默认实现返回 NotSupported，以保持该接口的向后兼容性
+  // （避免破坏既有实现类与测试替身）。
+  virtual Status DeleteRange(uint32_t topic_id, const TimeRange& range,
+                             uint64_t* deleted_events = nullptr,
+                             uint64_t* deleted_bytes = nullptr) {
+    (void)topic_id;
+    (void)range;
+    (void)deleted_events;
+    (void)deleted_bytes;
+    return Status::NotSupported("DeleteRange not supported by this timeline");
+  }
+
+
   // --- 快照与保留 ---------------------------------------------------------
 
   // 创建一个"保留点"：此后其之前的数据不会被保留策略淘汰。

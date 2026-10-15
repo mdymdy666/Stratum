@@ -668,6 +668,86 @@ Status TimelineImplV2::LoadSessionLocked() {
   return Status::OK();
 }
 
+// 删除话题在 range 内的数据。
+//
+// 【关键】删除是**主动行为**，会在时间轴上留下空洞。必须记录 pruned 区间，
+// 否则 verify 会把它当作"数据丢失"（RC-4）上报 —— 那会让人去查
+// 并不存在的录制问题。这与 ctl stop 必须留痕是同一个道理。
+Status TimelineImplV2::DeleteRange(uint32_t topic_id, const TimeRange& range,
+                                   uint64_t* deleted_events,
+                                   uint64_t* deleted_bytes) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
+
+  auto it = topic_meta_.find(topic_id);
+  if (it == topic_meta_.end()) {
+    return Status::NotFound("topic id not registered: " + std::to_string(topic_id));
+  }
+  if (range.Empty()) {
+    return Status::InvalidArgument("empty delete range (begin >= end)");
+  }
+
+  // 删除前先统计，便于回填
+  uint64_t count_before = it->second.message_count;
+  uint64_t bytes_before = it->second.byte_count;
+
+  Status s = db_->DeleteRange(topic_id, range.begin_ns, range.end_ns);
+  if (!s.ok()) return s;
+
+  // --- 重新统计该话题（删除后从 DB 重新数，避免估算误差累积）---
+  uint64_t after_count = 0, after_bytes = 0;
+  {
+    TimeRange all;
+    all.begin_ns = kInvalidTimestamp;
+    all.end_ns = kInvalidTimestamp;
+    std::vector<Event> remaining;
+    Status qs = db_->QueryRange(topic_id, all.begin_ns, all.end_ns, &remaining);
+    if (qs.ok()) {
+      after_count = remaining.size();
+      for (const auto& e : remaining) after_bytes += e.payload.size();
+    } else {
+      // 查不到就退化为按删除前的计数处理，不虚报
+      after_count = count_before;
+      after_bytes = bytes_before;
+    }
+  }
+  const uint64_t del_events = (count_before > after_count) ? (count_before - after_count) : 0;
+  const uint64_t del_bytes = (bytes_before > after_bytes) ? (bytes_before - after_bytes) : 0;
+
+  // --- 更新统计 ---
+  it->second.message_count = after_count;
+  it->second.byte_count = after_bytes;
+  // 【FR-R-11】删空后**保留元数据**，只标记为空：
+  // 否则"这个话题曾经存在过、它的类型是什么"这一事实会永久丢失。
+  it->second.active = (after_count > 0);
+  if (after_count == 0) {
+    it->second.first_seen_ns = kInvalidTimestamp;
+    it->second.last_seen_ns = kInvalidTimestamp;
+  }
+  if (total_events_ >= del_events) total_events_ -= del_events;
+  if (total_bytes_ >= del_bytes) total_bytes_ -= del_bytes;
+
+  // --- 记录 pruned 区间（使"主动删除"可追溯）---
+  // 用独立 meta key，避免改动既有会话元数据编码（向后兼容）。
+  {
+    const std::string key = std::string("pruned/") + std::to_string(topic_id);
+    std::string existing;
+    (void)db_->MetaGet(key, &existing);
+    std::string rec = existing;
+    rec += std::to_string(range.begin_ns);
+    rec += ',';
+    rec += std::to_string(range.end_ns);
+    rec += ',';
+    rec += std::to_string(del_events);
+    rec += '\n';
+    (void)db_->MetaPut(key, rec);   // 记录失败不阻断删除本身
+  }
+
+  if (deleted_events) *deleted_events = del_events;
+  if (deleted_bytes) *deleted_bytes = del_bytes;
+  return Status::OK();
+}
+
 Status TimelineImplV2::PersistSessionLocked() {
   // 【保护】若本次打开后**从未 append 过任何事件**，则不覆盖已存的会话元数据。
   //
