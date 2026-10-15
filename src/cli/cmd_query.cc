@@ -32,6 +32,8 @@
 #include "cli_common.h"
 #include "stratum/core/recorder.h"
 #include "stratum/core/timeline_impl_v2.h"
+#include "stratum/types/json_serializer.h"
+#include "stratum/types/iserializer.h"
 
 using namespace stratum;
 
@@ -52,6 +54,9 @@ struct QueryOpts {
   std::string until_raw;
   std::string state_at_raw;
   bool with_payload = false;
+  // 类型解码（可选）。不加时行为与以前完全一致。
+  bool decode = false;
+  std::string type_format = "json";   // 当前只实现了 json
   uint64_t limit = 0;    // 0 = 不限
   uint64_t offset = 0;
   bool stream = false;
@@ -178,6 +183,31 @@ int DoListTopics(TimelineImplV2& tl, const SessionMetadata& meta, uint64_t base_
   return kOk;
 }
 
+// 把"是否成功解码"附加到事件 JSON 上。
+//
+// 三种情形必须可区分：
+//   · 未启用 --decode      -> 不加任何字段（保持既有输出不变）
+//   · 启用但无类型定义     -> decoded:false + reason:"no_type_definition"
+//   · 启用且解码失败       -> decoded:false + reason:"decode_failed"
+//   · 解码成功             -> decoded:true  + value:{...}
+void AppendDecodedJson(Sink* out, const QueryOpts& o,
+                       const types::SerializerPtr& decoder, bool can_decode,
+                       const std::string& payload) {
+  if (!o.decode) return;
+  if (!can_decode || decoder == nullptr || !decoder->supports_deserialization()) {
+    out->Print(",\"decoded\":false,\"reason\":\"no_type_definition\"");
+    return;
+  }
+  types::DynamicValue dv;
+  Status ds = decoder->Deserialize(payload, &dv);
+  if (!ds.ok()) {
+    out->Print(",\"decoded\":false,\"reason\":\"decode_failed\"");
+    return;
+  }
+  out->Print(",\"decoded\":true,\"value\":%s", dv.ToString().c_str());
+}
+
+
 // ---------------------------------------------------------------------------
 // 模式 2：按时间范围导出
 // ---------------------------------------------------------------------------
@@ -188,6 +218,29 @@ int DoExport(TimelineImplV2& tl, const SessionMetadata& meta, uint64_t base_ns,
   if (!s.ok()) {
     return Fail(kNotFound, "找不到话题: " + o.topic, s.ToString(),
                 "用 `stratum query " + o.session + " --list-topics` 查看可用话题");
+  }
+
+  // -------------------------------------------------------------------------
+  // 类型解码器（仅在 --decode 时创建）
+  //
+  // 现实：record 会写 type_definition（recorder.cc 从 ReceivedSample 取），
+  // 但该字段**常为空** —— DDS 的 SEDP 不保证携带类型定义（见 Q11）。
+  // 因此"解不出来"是常态而不是异常，必须在输出里**如实标注**，
+  // 否则使用者会以为"这条数据里没有内容"。
+  // -------------------------------------------------------------------------
+  types::SerializerPtr decoder;
+  bool can_decode = false;
+  if (o.decode) {
+    types::TypeDescriptor td;
+    td.name = tm.type_name;
+    td.definition = tm.type_definition;
+    td.definition_format = tm.type_definition.empty() ? std::string() : o.type_format;
+    can_decode = td.HasDefinition();
+    decoder = types::CreateSerializer(td);
+    LogVerbose(g, 1, std::string("类型解码：") +
+                          (can_decode ? "有类型定义，尝试解码"
+                                      : "无类型定义（降级为原始字节）") +
+                          "，type=" + tm.type_name);
   }
 
   TimeRange range;
@@ -277,6 +330,7 @@ int DoExport(TimelineImplV2& tl, const SessionMetadata& meta, uint64_t base_ns,
         if (o.with_payload) {
           out.Print(",\"payload_hex\":\"%s\"", HexPrefix(e.payload, 64).c_str());
         }
+        AppendDecodedJson(&out, o, decoder, can_decode, e.payload);
         out.Print("}\n");
       }
     } else {
@@ -300,6 +354,7 @@ int DoExport(TimelineImplV2& tl, const SessionMetadata& meta, uint64_t base_ns,
         if (o.with_payload) {
           out.Print(",\"payload_hex\":\"%s\"", HexPrefix(e.payload, 64).c_str());
         }
+        AppendDecodedJson(&out, o, decoder, can_decode, e.payload);
         out.Print("}");
       }
       out.Print("]}\n");
@@ -470,6 +525,20 @@ int CmdQuery(const std::vector<std::string>& args, GlobalOptions g) {
     if (a == "--list-topics") { o.list_topics = true; continue; }
     if (a == "--all-topics") { o.all_topics = true; continue; }
     if (a == "--with-payload") { o.with_payload = true; continue; }
+    if (a == "--decode") { o.decode = true; continue; }
+    if (a == "--type-format") {
+      const std::string* v = need("--type-format");
+      if (!v) return Fail(kUsage, "--type-format 缺少参数值", "",
+                          "当前支持: json");
+      o.type_format = *v;
+      if (o.type_format != "json") {
+        return Fail(kUsage, "--type-format " + *v + " 暂不支持",
+                    "类型系统当前只实现了 JSON 自描述格式",
+                    "请用 --type-format json；其它格式（idl/typeobject/xtypes）"
+                    "见 docs/03-open-questions.md 的 Q4");
+      }
+      continue;
+    }
     if (a == "--stream") { o.stream = true; continue; }
     if (a == "--topic") {
       const std::string* v = need("--topic");
@@ -517,7 +586,8 @@ int CmdQuery(const std::vector<std::string>& args, GlobalOptions g) {
     if (!a.empty() && a[0] == '-') {
       return Fail(kUsage, "query 不支持该选项: " + a,
                   "本版本支持 --list-topics/--topic/--since/--until/--state-at/"
-                  "--limit/--offset/--out/--with-payload/--stream",
+                  "--limit/--offset/--out/--with-payload/--stream/--decode/"
+                  "--type-format",
                   "完整选项见 docs/08-cli-spec.md 第 5 节");
     }
     if (o.session.empty()) {

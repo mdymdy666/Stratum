@@ -7048,3 +7048,80 @@ JSON 只有 number。`MakeUInt32(100)` 与 `MakeInt64(42)` 往返后都变成 `k
 * 用 `CreateSerializer` 建序列化器
 * 按 `supports_deserialization()` 决定：能解就输出结构化 JSON，
   不能解就**如实标注**"原始字节（无类型定义）" —— 不假装
+
+---
+
+## 2026-10-15（续 103）| `query --decode`：把类型系统接进 CLI
+
+### 一、先确认了一个关键事实
+
+`record` **确实**写 `type_definition`：
+
+```
+recorder.cc:324   meta.type_definition = s.type_definition;   // <- ReceivedSample
+types.h:46        std::string type_definition;
+```
+
+但**该字段常为空** —— DDS 的 SEDP 不保证携带类型定义（见 Q11）。
+另有一处缺口：**`TopicMetadata` 没有 `definition_format` 字段**，
+所以无法从会话元数据判断定义格式（该字段目前只存在于 `types::TypeDescriptor`）。
+
+**裁决**：`--decode` 默认按 `json` 处理（当前唯一实现的格式），
+可用 `--type-format` 覆盖；将来加格式时在这里分发。
+
+### 二、交付
+
+`src/cli/cmd_query.cc`（+70 行）：
+* `--decode`（可选；**不加时行为完全不变**）
+* `--type-format json`（其它值明确报错并指向 Q4）
+* `AppendDecodedJson()` 辅助：把"是否成功解码"附加到事件 JSON 上
+
+**四种情形必须可区分**：
+
+| 情形 | 输出 |
+|---|---|
+| 未启用 `--decode` | 不加任何字段（保持既有输出） |
+| 启用但无类型定义 | `"decoded":false,"reason":"no_type_definition"` |
+| 启用且解码失败 | `"decoded":false,"reason":"decode_failed"` |
+| 解码成功 | `"decoded":true,"value":{...}` |
+
+> **为什么不能静默省略**：降级是**常态**（见上）。若不明示，
+> 使用者会以为"这条数据里没有内容"，而不是"我们没有它的类型信息"。
+
+### 三、实测
+
+```
+录 242 条（domain 44, decode/t1, HelloWorld）
+
+不加 --decode     -> 输出不含 decoded 字段（grep 计数 0）—— 行为不变 ✓
+--decode          -> 242 条全部 "decoded":false,"reason":"no_type_definition" ✓
+--decode --stream -> 流式同样正确 ✓
+-v                -> "类型解码：无类型定义（降级为原始字节），type=HelloWorld" ✓
+--type-format idl -> 明确报错(USAGE): "类型系统当前只实现了 JSON 自描述格式" ✓
+```
+
+### 四、一个必须写下来的限制（诚实）
+
+**"真解码路径"没有端到端实测** —— 因为没有类型定义来源：
+SEDP 不携带，`record` 写下的就是空串。
+
+* 该路径的 **core 能力**已由 `tests/types/test_json_serializer.cc` 的场景 1 覆盖
+  （`TypeDescriptor{definition_format=json}` → 编解码往返正确）
+* 但要**端到端**验证，需要一个能提供类型定义的上游 ——
+  这正是 Q4 与"接 DDS-XTypes"要解决的问题
+
+**下一步的现实选择**（记录在此，供后续决策）：
+1. 从 SEDP 的 `type_information` / TypeObject 提取（需解析 XTypes，工作量大）
+2. 从用户提供的 IDL 文件导入类型（需 IDL 解析器）
+3. 从本地类型注册表按 `type_name` 查找用户事先注册的自描述定义（**最轻，可先做**）
+
+第三条与现有 CLI 结构最贴合：可以加 `stratum types register <name> --from <json 文件>`，
+把定义写进会话元数据，之后 `--decode` 就能真的解出来。
+
+### 五、状态
+
+```
+全量 ctest: 42 / 42
+CLI 七组命令；query 新增 --decode / --type-format
+类型系统：DynamicValue ✅ -> 序列化器 ✅ -> CLI 接入 ✅（降级路径已验证）
+```
