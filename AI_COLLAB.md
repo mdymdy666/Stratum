@@ -7923,3 +7923,109 @@ ctl pause          -> 明确拒绝，USAGE(2)                              ✓
 **仅剩 `metrics` 一项** → 继续延长（硬上限 22:00）。
 
 **下一轮计划**：`metrics`（Prometheus 文本格式导出）+ 为 `io`/`doctor` 补测试。
+
+---
+
+
+---
+
+# 🏁 收尾总结（2026-10-15 19:55）
+
+**本阶段目标（cmd 模块 + types 模块）已全部完成。**
+
+## 一、最终状态
+
+```
+CLI 十二组命令：
+  session  query  verify  config  record  play
+  prune    types  ctl     io      doctor  metrics
+全量 ctest: 47 / 47
+与远端一致: 本地 HEAD == origin/main
+中转目录: 已清空
+```
+
+## 二、完成清单
+
+### cmd 模块
+
+| 命令 | 内容 | 关键设计 |
+|---|---|---|
+| `session` | list / info | **查询类命令不得有创建副作用**（`Open` 会创建会话，必须前置 `SessionExists`） |
+| `query` | 范围/定点/流式/**--decode** | 四种解码情形可区分 |
+| `verify` | 完整性归因 RC-1~RC-6 | **主动裁剪与数据缺口分开呈现** |
+| `config` | validate / explain / **lock·unlock·status** | 编辑锁：存在且非空 = 锁定 |
+| `record` | 真录制 | dry-run 打印**后果** |
+| `play` | 回放（限速/remap/loop） | 6 个选项**有意**报暂不支持 |
+| `prune` | 三层保护 + dry-run 契约 + 审计 | **默认不删**，需 `--yes` |
+| `types` | register / list / show | 独立 key `typedef/<topic>` |
+| `ctl` | status / stop --reason / events | **`stop --reason` 必填**（否则 verify 误判 RC-3/RC-4） |
+| `io` | export / verify / import | **语义对账为判据**，文件清单仅作诊断 |
+| `doctor` | 六项体检 + `--recover` | 只做真实安全的恢复；**不假装能修 LSM** |
+| `metrics` | Prometheus 文本 + `--json` | 默认输出自己的自然格式 |
+
+### types 模块
+
+`DynamicValue`（11 工厂 + JSON 风格 ToString）→ JSON 序列化器 + 降级模式 →
+`query --decode` → `types register`。决策记录在 `docs/11-type-system.md`。
+
+### 质量基础设施
+
+* `tools/run_tsan.sh` —— 用 `setarch -R` 绕过 WSL 的 TSan 映射冲突
+* 全量 ctest 从 **39 增至 47**
+
+## 三、本阶段修掉的真实缺陷
+
+1. **会话元数据读写不对称** —— `Close()` 持久化了会话元数据，但 `Open()`
+   从不加载；更糟的是 `Open` + `Close`（无追加）会把真实元数据**覆盖成 0**，
+   属于**静默数据损坏**。
+2. **并发 use-after-free** —— `opened_` 在锁外检查，而 `Close()` 会释放 `db_`。
+   稳定复现 SIGSEGV（`RegisterWhileClosing`），修复后 TSan **零告警**。
+   **教训**：`atomic<bool>` 只是掩盖症状，把检查移进锁内才是修根因。
+3. **`session info` 的创建副作用** —— 对不存在的路径"成功"并显示"话题 0 个"。
+4. **`type_definition` 从未进存储** —— `StratumDB::RegisterTopic` 只编码
+   `(id, type_name)`，所以 `--decode` 永远拿不到定义。
+5. **`io` 的校验判据错误（我引入的）** —— 把"LSM 文件清单一致"当判据，
+   而 bundle 是**活的 LSM 目录**，文件必然漂移（实测亲眼看到 `.ldb` 从 0 变 2）。
+   改为**语义对账**。
+
+## 四、沉淀下来的设计原则
+
+1. **主动行为必须留痕** —— 裁剪（`pruned/`）、主动停止（`control_events`）、
+   类型注册（`typedef/`）都要能与"故障"区分，否则事后复盘会去查**不存在**的问题。
+2. **独立 meta key + 追加式 + 接口默认实现返回 NotSupported** ——
+   三处验证过的模式，**不改动既有编码格式**（避免牵动版本兼容）。
+3. **不要把天然易变的东西当作不变量** —— LSM 文件清单会漂移。
+4. **降级是常态，不是异常** —— DDS 的 SEDP 不保证携带类型定义。
+5. **危险操作默认安全** —— `prune` 默认 dry-run；`import` 默认不覆盖。
+6. **诚实胜于好看** —— 修不了就说修不了（doctor 不做 LSM 修复）；
+   有损就写成断言（JSON 序列化的两处有损）；**结论对但工具错也要修**。
+
+## 五、方法学教训（踩过的坑）
+
+* **heredoc 必须用 `<<'EOF'`（带引号）** —— 我在收尾时用了 `<<EOFX`，
+  于是记录里的**反引号被 shell 当命令执行**，写进去的内容被破坏，
+  连后续 shell 代码都被当成了 heredoc 内容。**要用 `write` 写文件再 `cat` 追加。**
+
+* **搬移代码块必须用括号计数**定范围 —— 用 `awk '/^}$/'` 会匹配到内层 `}`，
+  导致代码插到 `return` 之后成为死代码；按行号搬移又会让 `return` 落进循环体内
+  （语法通过、逻辑错、**单话题测不出来**）。
+
+* **"脚本报成功"不等于改对了** —— 校验条件自身也会错。**本阶段栽了 4 次**：
+  ① 只比字符串先后没查语义结构；② 相邻行匹配因中间有空行而落空；
+  ③ 匹配到**注释里的示例文本**；④ 检查字符串带了多余的引号。
+
+* **涉及"逐项遍历"的逻辑，测试数据必须 ≥2 项** —— 单话题曾掩盖 bug。
+
+* **引用文档前必须核对它存在** —— 我曾引用不存在的 `docs/03-open-questions.md`
+  并虚构了「Q4」编号，还把错误写进了任务说明影响后续轮次。
+
+* **提交成功 ≠ 推送成功** —— 网络 502 需带退避重试（10/20/30 秒）。
+
+* **`grep -c` 计数为 0 时退出码是 1** —— 不要写 `|| echo 0`（会追加第二个 0）。
+
+* **`enum class` 不能直接喂 `STRATUM_CHECK_EQ`** —— 用 `static_cast<int>`。
+
+* **全局 `--format` 默认是 json** —— 影响过断言 3 次；
+  专用命令（如 `metrics`）应输出自己的自然格式，不继承全局默认。
+
+* **`/tmp` 会被系统定期清理** —— 实测会话放 `$HOME`。

@@ -239,6 +239,7 @@ int main(int argc, char** argv) {
   else if (cmd == "ctl") rc = CmdCtl(args, g);
   else if (cmd == "io") rc = CmdIo(args, g);
   else if (cmd == "doctor") rc = CmdDoctor(args, g);
+  else if (cmd == "metrics") rc = CmdMetrics(args, g);
   else if (false) {
     rc = CmdNotImplemented(cmd);
   } else {

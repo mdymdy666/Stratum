@@ -142,3 +142,8 @@ stratum_add_test(test_topic_type_definition unit/test_topic_type_definition.cc u
 
 # 控制事件的存取（校准：逗号/换行必须被转义，否则会破坏行格式）
 stratum_add_test(test_control_events unit/test_control_events.cc unit storage)
+
+# CLI 命令 io / doctor 的集成测试（通过 popen 调用真实二进制，
+# 因为这两个命令的逻辑在 CLI 层，单元测试链接不到；
+# 项目现有的 shell 场景脚本又不进 ctest，故用 C++ 包装以保证进质量门）
+stratum_add_test(test_cli_io_doctor integration/test_cli_io_doctor.cc integration cli)
