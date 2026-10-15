@@ -195,3 +195,22 @@ target_link_libraries(stratum_all INTERFACE
     stratum_logging
     stratum_config
 )
+
+# ---------------------------------------------------------------------------
+# 类型系统（DynamicValue / 序列化插件）
+#
+# 【为什么单独成库】iserializer.h 早就声明了 DynamicValue 的工厂与 ToString，
+# 但一直没有实现 —— 数据存进去是黑盒字节，无法按字段查询或结构化导出。
+# 本库填上这层基础，使"信息采集"能兑现成"信息可用"。
+# ---------------------------------------------------------------------------
+add_library(stratum_types STATIC
+    src/types/dynamic_value.cc
+)
+target_include_directories(stratum_types PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(stratum_types PUBLIC stratum_core)
+
+target_link_libraries(stratum_all INTERFACE
+    stratum_types
+)

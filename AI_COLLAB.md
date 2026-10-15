@@ -6891,3 +6891,86 @@ DRY RUN — 未修改任何数据
 全量 ctest: 40 / 40
 CLI 七组命令: session / query / verify / config / record / play / prune
 ```
+
+---
+
+## 2026-10-15（续 101）| 类型系统第一步：DynamicValue 工厂 + 自描述输出
+
+### 一、为什么先做这个（应用判断）
+
+用户问"从应用角度该带来什么价值"。我的回答里有一条关键：
+**"信息采集"的价值在事后分析，而分析需要语义。**
+
+调研后发现类型系统其实是**空壳**：
+
+| 项 | 实现前 |
+|---|---|
+| `types/` 模块 | 只有一个头文件 `iserializer.h`（121 行），`src/src/types/` **无任何实现** |
+| `DynamicValue` 工厂 | 声明了 6 个（Kind 却有 11 种），**0 处实现** |
+| `DynamicValue::ToString` | 未实现 |
+| `ISerializer` / 工厂 | 只有接口，无实现 |
+
+后果：数据存进去是**黑盒字节**。能说"录了 341 条 / 45.47 KB"，
+**说不出"录了什么"** —— 无法按字段查询、结构化导出、可视化、跨语言消费。
+
+**这本身就是"从能存到有用"的分界线，所以先补它。**
+
+### 二、交付
+
+* `src/src/types/dynamic_value.cc`（226 行，新库 `stratum_types`）
+* `iserializer.h` 补齐 **11 个工厂声明**（原来只有 6 个，缺 Null/Bool/Int32/UInt32/UInt64）
+* `tests/types/test_dynamic_value.cc`（12 用例，三类覆盖）
+
+### 三、五条设计裁决
+
+**1. ToString 采用 JSON 风格**（而非自定义格式）
+既便于人读，又能被 CLI 直接当结构化输出用（stdout 是数据出口）。
+语法严格贴 JSON：对象键加引号、字符串转义。
+
+**2. `kBytes` 输出 `"hex:..."`，不冒充字符串** ★
+二进制内容当文本处理会让人**误读**。明确标注比看起来干净更重要。
+实测：`MakeBytes("\x00\x0a\xff")` → `"hex:000aff"`。
+
+**3. `double` 用 17 位有效数字**
+IEEE754 往返安全的最低要求。若用 `%.6g`，`ToString` 后再解析会失真。
+实测断言：`0.1 + 0.2` 输出后再 `stod`，**必须与原值逐位相等**。
+
+**4. 补齐 11 个工厂**
+原来 6 个工厂对应 11 种 Kind，缺的 5 种只能手工填 `kind` 与联合字段，容易写错。
+
+**5. 关于 Q4（类型定义格式）的暂定立场**
+用户未指定，我选**简化自描述**路线：
+* 先用 `TypeDescriptor.definition_format = "json"` 承载自描述定义
+* **不锁死**将来接 DDS-XTypes：`TypeDescriptor` 已预留 `definition_format` 字段，
+  将来加 `"xtypes"` 分支即可，不需改动现有接口
+
+### 四、测试（12 用例，三类覆盖）
+
+| 类别 | 用例 |
+|---|---|
+| 基础 | 11 工厂的 kind 与值一致；标量 ToString；转义（引号/反斜杠/换行/制表）；空容器紧凑形式；嵌套缩进 |
+| **设计裁决** | bytes 加 hex 前缀；double 往返精度 |
+| 大数据量 | 10 万元素数组（输出 888892 字节） |
+| 随机（4 种子） | 随机嵌套结构，任意输出的括号/引号必须配平 |
+| 真实场景 ×3 | ① 传感器读数 struct ② 点表 array-of-struct ③ 二进制负载标注 |
+
+### 五、踩的坑：CMake 路径约定有两种
+
+项目里并存两种写法：
+* **库代码**在 `src/src/`，CMake 写 `src/...`（如 `src/core/status.cc`）
+* **CLI/移植代码**在 `src/cli/` 等，CMake 写 `cli/...`
+
+我一开始把实现放 `src/src/types/` 却写成 `types/dynamic_value.cc`，
+CMake 报了 `Cannot find source file`。改正为 `src/types/dynamic_value.cc`。
+
+**顺带**：`nm` 验证符号时要注意 C++ 的 `[abi:cxx11]` 标签 ——
+`ToString` 因返回 `std::string` 而带该标签，用 `DynamicValue::ToString(` 直接 grep 会漏。
+
+### 六、下一步
+
+类型系统的第二步：**序列化器**
+* 实现 `ISerializerFactory`（按 `definition_format` 选择实现）
+* 按接口契约，**描述符无定义时返回"透传"序列化器**（`supports_deserialization() == false`），
+  而不是失败 —— 这是降级模式的要求
+* 实现 JSON 自描述类型的编解码
+* 然后让 CLI `query --decode` 能输出结构化数据

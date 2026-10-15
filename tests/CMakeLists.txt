@@ -124,3 +124,6 @@ stratum_add_test(test_session_metadata unit/test_session_metadata.cc unit storag
 
 # DeleteRange：CLI prune 的地基（删除是唯一不可逆操作，必须有回归）
 stratum_add_test(test_delete_range unit/test_delete_range.cc unit storage)
+
+# DynamicValue 工厂与自描述输出（把 KnownGap 变成已覆盖能力）
+stratum_add_test(test_dynamic_value types/test_dynamic_value.cc types)

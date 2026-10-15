@@ -69,13 +69,25 @@ struct DynamicValue {
   std::vector<DynamicValue> elements;                        // kArray
   std::vector<std::pair<std::string, DynamicValue>> fields;  // kStruct
 
-  static DynamicValue MakeString(std::string s);
+  // 工厂：覆盖全部 11 种 Kind。
+  //
+  // 【为什么补齐】原头文件只声明了 6 个（String/Int64/Double/Bytes/Array/Struct），
+  // 而 Kind 有 11 种 —— 缺的 Bool/Int32/UInt32/UInt64/Null 无法构造，
+  // 调用方只能手工填 kind 与联合字段，容易写错。
+  static DynamicValue MakeNull();
+  static DynamicValue MakeBool(bool b);
+  static DynamicValue MakeInt32(int32_t v);
   static DynamicValue MakeInt64(int64_t v);
+  static DynamicValue MakeUInt32(uint32_t v);
+  static DynamicValue MakeUInt64(uint64_t v);
   static DynamicValue MakeDouble(double v);
+  static DynamicValue MakeString(std::string s);
   static DynamicValue MakeBytes(std::string b);
   static DynamicValue MakeArray();
   static DynamicValue MakeStruct();
 
+  // 自描述文本输出。刻意采用 **JSON 风格**（对象键加引号、字符串转义、
+  // 二进制加 hex: 前缀）—— 既便于人读，又能被 CLI 直接当结构化数据用。
   std::string ToString(int indent = 0) const;
 };
 

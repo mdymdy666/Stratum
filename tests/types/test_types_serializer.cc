@@ -763,7 +763,12 @@ STRATUM_TEST(Types, RealScenario_SensorBatchUpload) {
 // ===========================================================================
 
 STRATUM_TEST(Types, KnownGap_FactoriesAndToStringNotImplemented) {
-  // iserializer.h 声明了以下符号，但当前没有实现（nm 扫遍静态库无符号）：
+  // 【已解决】本节曾记录：iserializer.h 声明了工厂与 ToString 但未实现
+  // （nm 扫遍静态库无符号）。现已实现于 src/src/types/dynamic_value.cc，
+  // 并有独立测试 tests/types/test_dynamic_value.cc 覆盖（12 个用例）。
+  // 下面的结构性记录保留作为历史，不再代表当前状态。
+  //
+  // 历史记录：iserializer.h 声明了以下符号，但当时没有实现：
   //   DynamicValue::MakeNull / MakeBool / MakeInt32 / MakeInt64 / MakeUInt32 /
   //   MakeUInt64 / MakeDouble / MakeString / MakeBytes / MakeArray / MakeStruct
   //   DynamicValue::ToString(int) const
