@@ -77,8 +77,14 @@ for t in "${TARGETS[@]}"; do
   LOG="/tmp/_tsan_${t}.log"
   setarch "$(uname -m)" -R "$BIN" > "$LOG" 2>&1
   RC=$?
-  N_RACE=$(grep -c "WARNING: ThreadSanitizer" "$LOG" 2>/dev/null || echo 0)
-  N_FATAL=$(grep -c "FATAL: ThreadSanitizer" "$LOG" 2>/dev/null || echo 0)
+  # 注意：不要写 `grep -c ... || echo 0`。
+  # grep -c 总会输出一个数字，但计数为 0 时退出码是 1，
+  # 于是 `|| echo 0` 会再追加一行，变量变成 "0\n0"，
+  # 后续 `[ "$N" -gt 0 ]` 就会报 "integer expression expected"。
+  N_RACE=$(grep -c "WARNING: ThreadSanitizer" "$LOG" 2>/dev/null)
+  N_FATAL=$(grep -c "FATAL: ThreadSanitizer" "$LOG" 2>/dev/null)
+  N_RACE=${N_RACE:-0}
+  N_FATAL=${N_FATAL:-0}
 
   if [ "$N_FATAL" -gt 0 ]; then
     echo "  [环境] $t: TSan 无法运行（$N_FATAL 条 FATAL）"
