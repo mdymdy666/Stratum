@@ -6274,3 +6274,83 @@ $ stratum verify <真实会话>               → 报告 + 退出码 0
 | 日志 | CLI 的 `--verbose` / `--log-format json` / `--log-file`（当前只记录参数未生效） |
 | 配置 | `config validate/explain` 换成完整的 `IniFile`（当前是自写极简解析器）；`record --config` 用 `Config` 热更新 |
 | 结合 | `Config` 的 `log.*` 变量直接驱动 `LoggerManager` → "改配置即改日志行为" |
+
+---
+
+## 2026-10-15（续 93）| CLI 接入日志模块 + 新增 query 命令
+
+用户确认"主要下一步是命令行"。本轮把上一轮移植的**日志模块接进 CLI**，
+并实现第一批里的 **query** 命令 —— 它是把 Stratum 已有的查询能力
+（尤其是**定点状态查询**这一差异化能力）暴露给命令行的关键一步。
+
+### 一、交付
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `src/cli/cli_common.h` | 172 | 加日志字段与 `InitLogging`、`ParseTimeValue`、`SessionExists` |
+| `src/cli/cli_common.cc` | 494 | 上述实现（含三类时间解析、RFC3339） |
+| `src/cli/main.cc` | 231 | 日志初始化、子命令分发、**参数解析边界修正** |
+| `src/cli/cmd_query.cc` | 601 | **新增**：`--list-topics` / `--topic` / `--state-at` |
+
+### 二、关键设计落实
+
+**1. stdout 纪律（最重要的约束）**
+CLI 的数据出口是 stdout。日志**只能**去文件或 stderr —— 否则
+`stratum query ... --format csv > data.csv` 会被日志污染。
+实现上 `InitLogging` 的 `stdout_enabled` **恒为 false**，`--log-file -` 走
+`LogItemWorker(MinimumFilter, PatternFormatter, StderrSink)` 手工装配。
+实测：`-vv --log-file - --format csv` 的 stdout 仍是纯 CSV。
+
+**2. 三类时间必须能区分**（`NFR-2.5`、`EC-01`）
+`@session+5s`（会话内偏移）/ `-30m`（相对现在）/ RFC3339（绝对）。
+**裸时间（无时区）主动拒绝**并给出动作提示 —— 落实设计文档的 R1 无歧义原则。
+
+**3. 定点查询区分四种状态**（`docs/08` 第 5 节的关键裁决）
+`kNotFound` / `kFound` / `kDisposed` / `kOutOfRange` 分别输出，
+且 `out_of_range` 时以退出码 **5 (PARTIAL)** 提示"查询问错了区间"，
+而不是与"没有数据"混为一谈。
+
+### 三、本轮发现并修的四个真问题
+
+**1. 参数解析边界错误（架构级）**
+原 `main.cc` 把**所有** argv 都按全局选项解析，导致子命令自己的选项
+（`--list-topics`）被当成"未知全局选项"直接报错。
+改为与 git/docker 一致的模型：`stratum [全局选项] <子命令> [子命令选项...]` ——
+遇到第一个位置参数即认定为子命令，**其后参数原样移交**。
+
+**2. `query` 对不存在的会话返回空结果 + 退出码 0**
+根因：`TimelineImplV2::Open()` 会**创建**会话目录（LSM 引擎在录制时正需如此），
+但**查询类命令不应有创建副作用**。新增 `SessionExists()` 在 Open 前检查，
+现在返回 `NOTFOUND(8)` + 三段式错误。
+
+**3. `-vv` 不被识别**
+help 里写了 `-vv` 但实现只认单个 `-v`。补上组合短选项解析（`-vv`/`-qv`）。
+
+**4. `@session` 在无会话元数据时不可用**
+`make_timeline` 等工具生成的会话不写 `created_at_ns`，导致
+`@session+5s` 报"会话创建时间未知"。改为**回退到首条数据时间**作为基准，
+并记一条日志说明回退发生。实测修复后：
+* `--since @session+0s --until @session+1s` 从 0 行变成 **50 行**（1s / 20ms 间隔，正确）
+* `--state-at @session+0.5s` 从空输出变成 `found, seq=26`（0.5s/20ms=25 → seq 26，正确）
+
+### 四、又发现一处上游缺陷（已记录）
+
+`--log-format json` 输出里出现字面量 `"ts":"{time}"`。
+查 `src/logging/log.cpp` 的 `PatternFormatter::add(...)` 注册表，
+实际支持的是
+`m p N e E f l t F c / logger level message thread fiber elapse thread_name file line function`
+—— **没有 `time`**，而头文件注释却声称支持。且实测 `{elapse}` 同样不被替换。
+
+处置：JSON 日志**不带时间字段**（采集器本就会补），并记入
+`docs/10-porting-notes.md` 第 7 节。**宁可少一个字段，也不输出字面量。**
+
+### 五、状态
+
+```
+test_log_config: 16 passed
+全量 ctest:      38 / 38 通过（21 秒）
+```
+
+CLI 现有四组命令：`session` / `query` / `verify` / `config`。
+下一批：`record` / `play`（需与 `RtpsBackend` 接线），
+以及 `config` 换用移植的完整 `IniFile`（当前是自写的极简解析器）。

@@ -143,6 +143,7 @@ add_executable(stratum
     cli/main.cc
     cli/cli_common.cc
     cli/cmd_session.cc
+    cli/cmd_query.cc
     cli/cmd_verify.cc
     cli/cmd_config.cc
 )

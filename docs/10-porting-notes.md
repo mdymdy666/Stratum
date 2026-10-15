@@ -203,3 +203,34 @@ diff -u /UserData/CodexWorkSpace/Go2Cpp/src/logging/log.cpp \
 | **日志** | CLI 的 `--verbose` / `--log-format json` / `--log-file`（当前 `main.cc` 里只是记录参数，未生效） |
 | **配置** | `stratum config validate/explain` 改为使用 `IniFile` 的完整解析能力（当前是自写的极简解析器，只支持 `key: value` 与一层嵌套）；`record --config` 使用 `Config` 的热更新 |
 | **两者结合** | `Config` 的 `log.*` 变量直接驱动 `LoggerManager`，实现"改配置即改日志行为" |
+
+---
+
+## 7 移植模块的已知缺陷（对上游的发现）
+
+移植过程中发现一处**注释与实现不一致**，记录在此以便上游修复后重新核对：
+
+### 7.1 `PatternFormatter` 声称支持 `{time}`，实际未注册
+
+* **头文件注释**（`src/include/stratum/logging/log.hpp`）写着：
+  > 默认格式支持 `{time}` `{level}` `{logger}` `{thread}` `{fiber}` `{file}` `{line}`
+
+* **实际注册表**（`src/logging/log.cpp` 的 `PatternFormatter::add(...)`）：
+  ```
+  m p N e E f l t F c
+  logger level message thread fiber elapse thread_name file line function
+  ```
+  **没有 `time`**。`{elapse}` 是**进程启动以来的秒数**，不是 wall-clock 时间戳。
+
+* **症状**：模式里写 `{time}` 会**原样输出字面量** `{time}`（未识别项按文档说明原样保留）。
+
+* **CLI 的规避**：`--log-format json` **不带时间字段**。
+  原因：`{elapse}` 同样不会被替换（实测输出字面量 `{elapse}`），
+  说明本模块没有可用的 wall-clock 占位符。
+  而 JSON 日志的消费者（journald / loki / filebeat）本来就会补采集时间戳，
+  因此**宁可不带，也不输出字面量或语义可疑的运行秒数**。
+  需要绝对时间时用默认的 text 格式（实测可用，形如
+  `2026-10-15 13:39:04.941 [INFO] stratum (file:line) msg`）。
+
+* **建议上游**：要么注册 `time` 字段（需要把 `LogRecord` 里的时间戳格式化为
+  wall-clock 字符串），要么修正头文件注释，避免使用者按注释写错。
