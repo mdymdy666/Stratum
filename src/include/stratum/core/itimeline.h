@@ -75,6 +75,23 @@ using EventIteratorPtr = std::unique_ptr<IEventIterator>;
 // 查询结果：某时刻的状态
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+// 控制事件（"主动操作"的痕迹）
+//
+// 【为什么必须记录】verify 会检查"录制是否中断"。若用户主动执行了
+// `ctl stop`，事后复盘时 verify 会把它当成 RC-3（发布者停了）或
+// RC-4（空洞），于是有人去查**并不存在的**问题。
+//
+// 这与 pruned 区间的情况完全一样：**主动行为必须留痕**，
+// 才能与"故障"区分开。
+// ---------------------------------------------------------------------------
+struct ControlEvent {
+  TimestampNs at_ns = kInvalidTimestamp;
+  std::string action;   // "stop" / "set" / "snapshot" / ...
+  std::string reason;   // 操作理由（对 stop 为必填）
+  std::string detail;   // 附加信息（如 retain 的新值）
+};
+
+// ---------------------------------------------------------------------------
 // 已裁剪区间（"主动删除"的痕迹）
 //
 // 【为什么必须单独记录】prune 删除数据会在时间轴上留下空洞。
@@ -152,6 +169,19 @@ class ITimeline {
   // 统计某范围内的消息数（不返回内容，用于报告）
   virtual Status CountRange(uint32_t topic_id, const TimeRange& range,
                             uint64_t* count_out) = 0;
+
+  // 记录/列出控制事件（CLI `ctl` 的地基）。
+  //
+  // 追加式写入，不做去重 —— 审计需要完整的操作序列。
+  // 默认实现返回 NotSupported，保持接口向后兼容（同 DeleteRange 的做法）。
+  virtual Status RecordControlEvent(const ControlEvent& event) {
+    (void)event;
+    return Status::NotSupported("RecordControlEvent not supported");
+  }
+  virtual Status ListControlEvents(std::vector<ControlEvent>* out) {
+    (void)out;
+    return Status::NotSupported("ListControlEvents not supported");
+  }
 
   // 设置/读取话题的类型定义（CLI `types register` 的地基）。
   //

@@ -724,6 +724,90 @@ Status TimelineImplV2::GetTopicTypeDefinition(const std::string& topic_name,
   return db_->MetaGet(std::string("typedef/") + topic_name, definition);
 }
 
+// 控制事件的写入与读取。
+//
+// 存储：独立 meta key `control_events`，追加式，每行
+//   "<at_ns>,<action>,<reason>,<detail>\n"
+//
+// 【为什么不放在会话元数据里】会话元数据是定长编码（见 LoadSessionLocked），
+// 改动它会牵动版本兼容；而这个信息是**追加式审计流**，独立 key 更合适。
+// 同 pruned/ 与 typedef/ 的做法。
+Status TimelineImplV2::RecordControlEvent(const ControlEvent& event) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
+
+  if (event.action.empty()) {
+    return Status::InvalidArgument("控制事件的 action 不能为空");
+  }
+
+  std::string existing;
+  (void)db_->MetaGet("control_events", &existing);
+  std::string rec = existing;
+  rec += std::to_string(event.at_ns != kInvalidTimestamp ? event.at_ns : 0);
+  rec += ',';
+  rec += event.action;
+  rec += ',';
+  // reason 与 detail 里的逗号/换行会破坏行格式，替换掉
+  std::string reason = event.reason;
+  for (char& c : reason) {
+    if (c == ',' || c == '\n' || c == '\r') c = ' ';
+  }
+  std::string detail = event.detail;
+  for (char& c : detail) {
+    if (c == ',' || c == '\n' || c == '\r') c = ' ';
+  }
+  rec += reason;
+  rec += ',';
+  rec += detail;
+  rec += '\n';
+
+  return db_->MetaPut("control_events", rec);
+}
+
+Status TimelineImplV2::ListControlEvents(std::vector<ControlEvent>* out) {
+  if (out == nullptr) {
+    return Status::InvalidArgument("ListControlEvents 的输出指针为空");
+  }
+  out->clear();
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!opened_) return Status::ShutdownInProgress("timeline not open");
+
+  std::string raw;
+  Status s = db_->MetaGet("control_events", &raw);
+  if (!s.ok()) return Status::OK();   // 没有记录不是错误
+
+  size_t pos = 0;
+  while (pos < raw.size()) {
+    const size_t nl = raw.find('\n', pos);
+    const std::string line =
+        raw.substr(pos, (nl == std::string::npos ? raw.size() : nl) - pos);
+    pos = (nl == std::string::npos) ? raw.size() : nl + 1;
+    if (line.empty()) continue;
+
+    // 切出 4 个字段（reason/detail 里的逗号已在写入时替换，故可安全按逗号切）
+    std::vector<std::string> f;
+    size_t p = 0;
+    for (int k = 0; k < 3; ++k) {
+      const size_t c = line.find(',', p);
+      if (c == std::string::npos) break;
+      f.push_back(line.substr(p, c - p));
+      p = c + 1;
+    }
+    f.push_back(line.substr(p));
+    if (f.size() != 4) continue;   // 容错：格式不对就跳过该行
+
+    ControlEvent e;
+    e.at_ns = std::strtoull(f[0].c_str(), nullptr, 10);
+    if (e.at_ns == 0) e.at_ns = kInvalidTimestamp;
+    e.action = f[1];
+    e.reason = f[2];
+    e.detail = f[3];
+    out->push_back(e);
+  }
+  return Status::OK();
+}
+
+
 // 读取该话题上"已被主动裁剪"的区间。
 //
 // 记录格式（由 DeleteRange 追加写入 pruned/<topic_id>）：

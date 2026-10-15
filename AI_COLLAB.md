@@ -7500,3 +7500,72 @@ result: 15 passed, 0 failed
 | 6 | 类型定义测试（15 用例） | 本次 |
 
 全量 ctest：42 → **45**。
+
+---
+
+## 2026-10-15（续 109）| `ctl` 离线子集：主动操作必须留痕
+
+### 一、为什么 `stop --reason` 必填（本命令存在的理由）
+
+`verify` 会检查"录制是否中断"。若用户主动停止，事后复盘时 verify 会把它归为
+**RC-3（发布者停了）** 或 **RC-4（空洞）** —— 于是有人去查**并不存在的**问题。
+
+这与 pruned 区间完全同理（那个已解决）：**主动行为必须留痕**，
+才能与"故障"区分开。所以 `--reason` 不是装饰，它是这条记录的意义所在。
+
+因此实现里：
+* 不带 `--reason` 直接拒绝，并在错误消息里**说清后果**：
+  "主动停止若不留理由，事后 verify 会把它误判为「发布者停了」(RC-3)
+   或「空洞」(RC-4)，于是有人去查并不存在的问题。"
+* `--dry-run` 明确"不写入任何记录"，且实测确认 `events` 仍为空
+* 多次 stop **累积**而不覆盖 —— 审计需要完整的操作序列
+
+### 二、范围（诚实说明）
+
+完整 ctl 需要**录制进程常驻 + Unix socket 控制通道**，本版本**未实现在线控制**。
+实装的是**离线子集**，且输出里明确写着：
+
+> 说明: 本版本为**离线**控制（不要求录制进程在跑）；
+>       在线的 socket 控制通道尚未实现。
+
+未实现：`resume` / `pause` / `add` / `set` / `snapshot` / `rotate`
+（调用时会明确报"需要常驻进程与 socket 通道，尚未实现"）。
+
+### 三、core 侧
+
+`ITimeline` 加 `RecordControlEvent` / `ListControlEvents`
+（**默认实现返回 NotSupported**，保兼容 —— 同 DeleteRange 的做法）；
+`TimelineImplV2` 覆盖，存储用独立 meta key `control_events`（追加式，每行
+`at_ns,action,reason,detail`）。
+
+**写入时把 reason/detail 里的逗号与换行替换成空格** ——
+否则会破坏行格式；解析时按同样规则切分。单行格式不对时跳过该行继续
+（审计信息损坏不该让整个查询失败）。
+
+### 四、实测
+
+```
+ctl status
+  -> 话题 1 个 / 事件 500 / 负载 12.00 KB / 完整性 无已知问题 / 控制事件 0 条
+  -> 磁盘可用 991.20 GB；容量提示"还可容纳约 82,600,013 倍"
+ctl stop（无 --reason）  -> 拒绝，USAGE(2)，错误消息解释后果 ✓
+ctl stop --dry-run       -> "未写入任何记录"；events 验证为空 ✓
+ctl stop --reason '调试完成，主动停止' --detail 'revision=abc123'
+  -> JSON: {"action":"stop","reason":"...","recorded":true} ✓
+ctl events               -> [时间戳] stop / 理由 / 详情 ✓
+ctl status               -> 控制事件 1 条 ✓
+第二次 stop              -> 累积为 2 条（不覆盖）✓
+```
+
+### 五、未做
+
+本命令**没有自动化测试**（时间用于打通端到端）。下一轮应补
+`tests/unit/test_control_events.cc`：写入/读取/累积/逗号转义/畸形行容错/
+多次操作序列/空 reason 拒绝（core 层只校验 action 非空，reason 的必填是 CLI 策略）。
+
+### 六、状态
+
+```
+全量 ctest: 45 / 45
+CLI 九组命令：session / query / verify / config / record / play / prune / types / ctl
+```

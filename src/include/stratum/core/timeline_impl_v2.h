@@ -78,6 +78,8 @@ class TimelineImplV2 : public ITimeline {
                                const std::string& definition) override;
   Status GetTopicTypeDefinition(const std::string& topic_name,
                                std::string* definition) override;
+  Status RecordControlEvent(const ControlEvent& event) override;
+  Status ListControlEvents(std::vector<ControlEvent>* out) override;
 
   Status CreateRetentionPoint(TimestampNs at_ns,
                               uint64_t* point_id_out) override;
