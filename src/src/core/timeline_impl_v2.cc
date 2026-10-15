@@ -99,6 +99,18 @@ Status TimelineImplV2::Open(const std::string& path) {
     opened_ = false;
     return ls;
   }
+  // 【必须】恢复会话级元数据。缺了这一步，重开后的 created_at_ns /
+  // closed_at_ns / total_* 全是初值（表现为 CLI 的"创建: (未设置)"，
+  // 以及 verify 误报"(未正常关闭)"）。
+  {
+    Status ss = LoadSessionLocked();
+    if (!ss.ok()) {
+      db_.reset();
+      opened_ = false;
+      return ss;
+    }
+  }
+
   return Status::OK();
 }
 
@@ -620,7 +632,55 @@ Status TimelineImplV2::LoadRetentionPointsLocked() {
   return Status::OK();
 }
 
+// 读取会话级元数据。
+//
+// 【为什么必须有】PersistSessionLocked 在 Close 时写入这些值，但 Open 此前
+// **没有**对应的读取 —— 于是新进程重开会话后 session_start_ns_ /
+// session_end_ns_ / total_events_ / total_bytes_ 全部回到初值，
+// GetSessionMetadata 返回 created_at_ns = 0：
+//   · CLI 显示「创建: (未设置)」
+//   · verify 误报「(未正常关闭)」（假阳性）
+Status TimelineImplV2::LoadSessionLocked() {
+  std::string raw;
+  Status s = db_->MetaGet(std::string(kSessionKey), &raw);
+  if (!s.ok()) {
+    // 会话元数据尚不存在（全新会话）不是错误
+    return Status::OK();
+  }
+  if (raw.size() < 32) {
+    return Status::Corruption("session metadata too short: " +
+                              std::to_string(raw.size()));
+  }
+  auto get64 = [&raw](size_t off) -> uint64_t {
+    uint64_t x = 0;
+    for (int i = 0; i < 8; ++i) {
+      x = (x << 8) | static_cast<unsigned char>(raw[off + static_cast<size_t>(i)]);
+    }
+    return x;
+  };
+  total_events_ = get64(0);
+  total_bytes_ = get64(8);
+  const uint64_t start = get64(16);
+  const uint64_t end = get64(24);
+  // 写入端把"无效"编码为 0，这里还原，避免 0 被当成真实时间戳
+  session_start_ns_ = (start == 0) ? kInvalidTimestamp : start;
+  session_end_ns_ = (end == 0) ? kInvalidTimestamp : end;
+  return Status::OK();
+}
+
 Status TimelineImplV2::PersistSessionLocked() {
+  // 【保护】若本次打开后**从未 append 过任何事件**，则不覆盖已存的会话元数据。
+  //
+  // 否则"打开 -> 立即关闭"（例如只做了 session info / verify 查询）
+  // 会把真实的时间戳与统计清零 —— 这是数据损坏，且症状隐蔽
+  // （事后只看到"创建: (未设置)"，不知道是被谁清的）。
+  if (session_start_ns_ == kInvalidTimestamp && total_events_ == 0) {
+    std::string existing;
+    if (db_->MetaGet(std::string(kSessionKey), &existing).ok() && !existing.empty()) {
+      return Status::OK();
+    }
+  }
+
   // 会话元数据编码（简化）：[8B total_events][8B total_bytes]
   // [8B start][8B end][4B topic_count]
   std::string v(36, '\0');

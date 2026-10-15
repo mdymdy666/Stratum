@@ -89,6 +89,9 @@ class TimelineImplV2 : public ITimeline {
   void UpdateQualityOnAppend(const Event& e);
   // 加载话题元数据（注册信息 + 统计）
   Status LoadTopicsLocked();
+  // 读取会话级元数据（created/closed/total_*）。
+  // 与 PersistSessionLocked 配对；缺失它会导致重开后会话时间戳归零。
+  Status LoadSessionLocked();
   // 持久化话题统计（first/last/count/bytes）
   Status PersistTopicStatsLocked(uint32_t topic_id, const TopicMetadata& meta);
   // 持久化会话元数据

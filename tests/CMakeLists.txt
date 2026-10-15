@@ -118,3 +118,6 @@ stratum_add_test(test_rtps_backend_usage rtps/test_rtps_backend_usage.cc rtps)
 # 移植模块：日志（logging）+ 配置（config）
 # 来源 /UserData/CodexWorkSpace/Go2Cpp，见 docs/10-porting-notes.md
 stratum_add_test(test_log_config unit/test_log_config.cc unit config)
+
+# 会话元数据的持久化与重载（曾因 Open 缺 LoadSession 导致 verify 假阳性）
+stratum_add_test(test_session_metadata unit/test_session_metadata.cc unit storage)

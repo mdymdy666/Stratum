@@ -6562,3 +6562,93 @@ stdout 只留数据出口。实测录制过程中的进度行全部在 stderr。
 全量 ctest: 38 / 38
 CLI 现有五组命令: session / query / verify / config / record
 ```
+
+---
+
+## 2026-10-15（续 97）| 修复会话元数据读写不对称（verify 假阳性根因）
+
+定时任务已建立（每 20 分钟，至 16:00）。本轮按优先级 1 推进。
+
+### 一、症状
+
+`stratum session info <会话>` 显示：
+```
+创建: (未设置)
+关闭: (未正常关闭 —— 可能崩溃)
+```
+`verify` 据此**误报**"(未正常关闭)"。**假阳性比缺失更危险** ——
+它会让使用者以为录制器崩过，转而去查不存在的问题。
+
+### 二、定位过程（两次修正方向）
+
+**第一次判断（错）**：以为是 `Recorder::Stop` 没写元数据。
+查 `recorder.cc` 发现它**确实**调了 `timeline_->Flush()` 与 `Close()`。
+
+**第二次判断（错）**：以为是 `AppendBatch` 漏了更新 `session_start_ns_`。
+查 `timeline_impl_v2.cc:298-303` 发现 `AppendBatch` **确实**更新了它，
+而且 `Recorder` 走的正是 `AppendBatch`（`recorder.cc:351`）。
+
+**真正根因（第三次）**：**读写不对称**。
+`TimelineImplV2::Close()` 会 `PersistSessionLocked()`（写），
+但 `Open()` **只加载 topics 与 retention，没有加载会话元数据** ——
+于是新进程重开后 `session_start_ns_` / `session_end_ns_` /
+`total_events_` / `total_bytes_` 全部回到初值，`GetSessionMetadata`
+返回 `created_at_ns = 0`。
+
+> **不是"没写"，而是"没读"。** 内存在同一进程里是对的，
+> 一旦跨进程（CLI 每次都是新进程）就全丢。
+
+### 三、连带发现一个更危险的缺陷
+
+`Open` 之后若**未 append 任何事件**就 `Close`，
+`PersistSessionLocked` 会把这套初值（0）**覆盖**已存的真实元数据。
+
+后果：**只读查询会把数据"查坏"**。例如反复跑
+`stratum session info` / `verify` / `query`（每个命令都 Open+Close），
+就会把会话时间戳与统计清零 —— 而且症状隐蔽（事后只看到"未设置"，
+不知道是被谁清的）。
+
+### 四、修复（两处）
+
+1. **新增 `LoadSessionLocked()` 并在 `Open()` 中调用**
+   读取 36 字节会话元数据，恢复 `total_events_` / `total_bytes_` /
+   `session_start_ns_` / `session_end_ns_`；
+   写入端把"无效"编码为 0，读取端再还原成 `kInvalidTimestamp`。
+
+2. **`PersistSessionLocked()` 加覆盖保护**
+   若本次打开后从未 append 过（`session_start_ns_ == kInvalidTimestamp &&
+   total_events_ == 0`）且已有存盘值，则**不覆盖**。
+
+### 五、验证
+
+新增 `tests/unit/test_session_metadata.cc`（387 行，**8 个用例**），三类覆盖齐全：
+
+| 用例 | 验证点 |
+|---|---|
+| `PersistAndReload` | 写→关→重开，created/closed/total 全部读回 |
+| `ReopenThenCloseMustNotClobber` | **只读打开再关闭不得清零**（核心保护） |
+| `EmptySessionHasNoTimestamps` | 空会话不编造时间戳 |
+| `LargeVolumeHundredThousand` | 10 万条：跨度 99.999 秒、字节数精确 |
+| `RandomReloadConsistentMultipleSeeds` | 4 种子随机条数/时间戳，重开后一致 |
+| `RecordingThenReview`（场景1） | 录制后复盘：三问（何时开始/结束/多少条）都能答 |
+| `ReadOnlyQueriesAreIdempotent`（场景2） | **10 轮只读查询后元数据完全不变** |
+| `CrashThenReopenKeepsPersisted`（场景3） | 崩溃未 Close 后重开，已落盘部分仍在 |
+
+实测（CLI 端到端）：
+```
+录制 6 秒（341 条）后：
+  创建: 1792044082.461 (2026-10-15T14:01:22+08:00)   ← 之前是"(未设置)"
+  关闭: 1792044088.343 (2026-10-15T14:01:28+08:00)   ← 之前是"(未正常关闭)"
+  verify: 会话创建/关闭 均有值，不再误报"(未正常关闭)"
+  两次只读查询前后 closed_at_ns 完全一致（1792044088342778089）→ 未被覆盖
+```
+
+### 六、下一步
+
+按定时任务的推进顺序：**实现 `play` 命令**（与 record 对称，闭环的另一半）。
+
+### 七、本轮踩的坑
+
+- Python 替换整段文本时因**缩进差异**（实际 2 空格、我写 4 空格）静默失败，
+  却打印了成功信息。改为"定位锚点行 + 插入"的方式，并在插入前打印实际内容核对。
+  **教训：`str.replace` 未匹配时不报错，必须自己校验结果。**
