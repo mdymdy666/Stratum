@@ -50,8 +50,23 @@ void PrintHelp() {
       "  session info  <会话>            显示会话元数据、话题摘要与质量统计\n"
       "  query         <会话>            查询：列话题 / 按时间范围导出 / 定点状态\n"
       "  verify        <会话>            完整性校验与质量报告\n"
+      "  record        <选项>            录制（本版本支持基础选项）\n"
       "  config validate <文件>          校验配置文件\n"
       "  config explain  <文件>          逐条解释配置的实际效果\n"
+      "  config lock/unlock/status <文件> 配置文件编辑锁\n"
+      "\n"
+      "record 的选项:\n"
+      "  --dir <目录>                    会话目录（必填）\n"
+      "  --domain <n>                    DDS 域号\n"
+      "  --duration <时长>               录制时长后自动停止（默认 25s）\n"
+      "  --continuous                    持续录制，直到 SIGINT/SIGTERM\n"
+      "  --include <话题>  --exclude <话题>  订阅筛选（可重复）\n"
+      "  --retain <时长>  --retain-bytes <大小>  保留策略\n"
+      "  --on-full drop-newest|drop-oldest|block  队列满时的策略\n"
+      "  --durability relaxed|balanced|strict\n"
+      "  --advertised-address <ip>       跨网段时**必须**显式指定\n"
+      "  --overwrite                     允许清空非空目录重录\n"
+      "  --dry-run                       只打印生效配置与后果，不录制\n"
       "\n"
       "query 的选项:\n"
       "  --list-topics                   列出话题（默认行为）\n"
@@ -70,7 +85,7 @@ void PrintHelp() {
       "    2026-10-14T10:00:00+08:00      RFC3339 绝对时刻\n"
       "\n"
       "尚未实现（明确报错，不静默）:\n"
-      "  record / play / prune / ctl / io / doctor\n"
+      "  play / prune / ctl / io / doctor\n"
       "  设计已完整，见 docs/08-cli-spec.md 与 docs/09-cli-scenarios-deep.md\n"
       "\n"
       "全局参数:\n"
@@ -217,7 +232,8 @@ int main(int argc, char** argv) {
   else if (cmd == "query") rc = CmdQuery(args, g);
   else if (cmd == "verify") rc = CmdVerify(args, g);
   else if (cmd == "config") rc = CmdConfig(args, g);
-  else if (cmd == "record" || cmd == "play" || cmd == "prune" || cmd == "ctl" ||
+  else if (cmd == "record") rc = CmdRecord(args, g);
+  else if (cmd == "play" || cmd == "prune" || cmd == "ctl" ||
            cmd == "io" || cmd == "doctor") {
     rc = CmdNotImplemented(cmd);
   } else {

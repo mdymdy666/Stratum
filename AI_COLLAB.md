@@ -6473,3 +6473,92 @@ warn / error / critical    -> stdout 均只有 2 行 CSV，首行为表头
 回到原需求主线：**实现 `record` 命令**（CLI 存在的意义所在，
 也是 `play`/`prune`/`ctl` 的前提）。需接 `RtpsBackend` 并落实
 `docs/08-cli-spec.md` 3.2 节的 `record` 状态机。
+
+---
+
+## 2026-10-15（续 96）| 实现 `record` 命令（CLI 第一批核心）
+
+用户要求继续推进原需求。本轮实现 `record` —— CLI 存在的意义所在，
+也是 `play`/`prune`/`ctl` 的前提。
+
+### 一、交付
+
+`src/cli/cmd_record.cc`（506 行）+ 声明/注册/CMake 接入。
+
+**参数面**（对齐 `docs/08-cli-spec.md` 第 3 节）：
+`--dir` / `--session-name` / `--domain` / `--participant-name` /
+`--advertised-address` / `--initial-peers` / `--duration` / `--continuous` /
+`--include`（可重复）/ `--exclude`（可重复）/ `--retain` / `--retain-bytes` /
+`--on-full` / `--durability` / `--max-buffer-bytes` / `--split-by-bytes` /
+`--write-batch-size` / `--overwrite` / `--dry-run` / `--no-stats`
+
+### 二、落地的三条设计约定
+
+**1. 目录非空时默认拒绝（EXISTS=3）**
+延续既有工具的 O19 修复：曾经无条件 `rm -rf`，导致"重启录制器"会
+**静默清空已有时间线**（实测数据从 301 条变 0 条，而用户只看到录制正常开始）。
+实测：`--dir /tmp/rec_nonempty` → `退出码 3 (EXISTS)` + 三段式提示。
+
+**2. `--dry-run` 打印**后果**而不只是参数**
+```
+retain:            24.00 小时
+  → **超过 24.00 小时的数据会被自动删除**
+```
+无 retain 时：
+```
+retain:            **不限制** → 数据一直累积，最终写满磁盘 (EC-11)
+```
+这正是 `EC-17` 的正面防线 —— 让人在**启动前**看出错误。
+且实测 `--dry-run` **不创建任何文件**（无副作用）。
+
+**3. 统计与日志一律走 stderr**
+stdout 只留数据出口。实测录制过程中的进度行全部在 stderr。
+
+### 三、真录制端到端验证（这是最关键的验收）
+
+```
+发布者: fastdds_pub_diag --domain=40 --topic=test/topic --count=500 --rate=50
+录制:   stratum record --dir /tmp/rec_real --domain 40 --duration 8s --include test/topic
+
+结果:
+  收到 392 条 / 写入 392 条 / 丢弃 0 / 45.47 KB / 跨度 7.902 秒
+  session info   -> 话题 1 个，392 条
+  query          -> 392 条，前 3 条 seq/时间戳/116 字节 全部正确
+  query --state-at @session+2s -> found, seq=104（2s/20ms=100 → 104，合理）
+  verify         -> 未发现完整性问题，退出码 0
+  --overwrite    -> 清空重录成功
+```
+
+**关键点**：整条链路用的是**我们自己新写的命令**（record → session → query → verify），
+不是旧工具。这验证了 CLI 的端到端可用性。
+
+### 四、暴露的一个真实缺口（待修）
+
+`session info` 显示：
+
+```
+创建:       (未设置)
+关闭:       (未正常关闭 —— 可能崩溃)
+```
+
+**根因**：`Recorder` 停止时**没有写入 `created_at_ns` / `closed_at_ns`**
+（`SessionMetadata` 的这两个字段保持 0）。这影响：
+
+* `FR-R-11` 要求的"自描述"不完整（无法回答"这段录制是什么时候录的"）
+* `verify` 会误报"(未正常关闭)"—— 实际是**正常关闭但没记录**
+
+**当前缓解**：`query` 的 `@session` 基准有**回退机制**（无 `created_at_ns` 时
+退回首条数据时间），所以 `--state-at @session+2s` 仍能工作。
+但这只是掩盖，**根因应在 `Recorder::Stop` 里补写会话时间戳**。
+
+**下一轮应修**（属于核心模块改动，需谨慎并补测试）：
+* `Recorder::Start` 时记录 `created_at_ns`
+* `Recorder::Stop` 时记录 `closed_at_ns`
+* 并让 `verify` 的"未正常关闭"判定基于 `closed_at_ns == 0` **且**会话确实非空
+
+### 五、状态
+
+```
+全量 ctest: 38 / 38
+CLI 现有五组命令: session / query / verify / config / record
+```
