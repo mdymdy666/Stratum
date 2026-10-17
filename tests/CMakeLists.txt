@@ -195,3 +195,9 @@ target_compile_definitions(test_verify_business PRIVATE
     PROBE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum"
     PROBE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 set_tests_properties(test_verify_business PROPERTIES TIMEOUT 400 RUN_SERIAL TRUE)
+
+# stratum diff：相对对齐 / 分桶检出尾部丢失 / payload 三档 / 业务层 / 空会话 / 规模 / 随机 / 错误
+stratum_add_test(test_diff integration/test_diff.cc integration cli)
+target_compile_definitions(test_diff PRIVATE
+    DIFF_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_diff PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)

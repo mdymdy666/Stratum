@@ -9256,3 +9256,94 @@ docs/15-session-diff.md 已产出（含三个裁决 + 输出契约 + 测试计�
 下一步：实现 cmd_diff.cc
 ```
 
+
+---
+
+## 2026-10-17（续 130）| stratum diff 实现 + 12 个测试全绿
+
+### 一、产出
+
+* `src/cli/cmd_diff.cc`（~750 行）
+* `tests/integration/test_diff.cc`（12 用例，全绿）
+* **全量 ctest 57 → 58**
+
+CLI 形态：
+
+```
+stratum diff <会话A> <会话B> [--bucket 20] [--compare-payload none|hash|sample]
+                             [--probe-prefix _probe.] [--only-changed] [--limit N]
+```
+
+### 二、★ 实现时发现裁决 ② 需要修正（已回写 docs/15）
+
+裁决原文"把相对时间轴等分成 N 桶"**没说清这个轴是各自的还是共同的**。
+
+第一版用**各自的 span** 做分母 → 两个会话都被归一化到 `[0,1]` → **时长差被抹掉**。
+
+实测暴露：A 均匀（跨度 1s，100 条）vs B 只在前 50% 写（跨度因此 0.5s，100 条）——
+用各自 span 归一化后两者桶分布完全一样，diff 报"无差异"，
+**「B 的尾部为空」消失了**。
+
+修正：分桶用 `max(left.span, right.span)` 作为统一参考。
+于是 A 占满 10 桶、B 只占前 5 桶 → 尾部为空被检出。
+
+**代价**：两侧时长差大时，短的那侧所有事件挤在前几个桶。
+但这由 `duration_warning` 覆盖 —— 两个信号配合：
+```
+duration_warning=false → 分桶可信
+duration_warning=true  → 分桶可能失真，靠条数/首末偏移判断
+```
+
+**这条修订说明「先写裁决再实现」的流程是有效的**：写文档时我就觉得"时间轴"含糊但没深究，
+实现时被测试逼着必须给确切答案，才发现含糊处正是关键。
+**但修订必须回写文档**，否则下一个人会重复同样的错误。
+
+### 三、修掉的三个实现/测试 bug
+
+**① diff 对不存在的路径创建了会话**
+
+`TimelineImplV2::Open` 会创建目录。diff 是纯查询，对拼错的路径静默创建空会话
+然后报"无差异" —— **这是最坏的结果：用户以为两份数据一样**。
+
+修：加 `SessionExists()` 预检 + 返回 `kNotFound(8)`。
+（这条纪律本来就在 prompt 里，我漏了。**查询类命令不得有创建副作用**。）
+
+**② 测试的 key 歧义**
+
+`PickInt(text, "left_events")` 找第一个匹配 —— 命中 `changed[].left_events`（单 topic = 1000），
+而不是顶层会话总数（10000）。
+
+修：加限定作用域的 `PickInSide(text, "left", "events")`。
+
+**③ 测试构造用了错误的分隔符**
+
+探针 topic 写成 `"_probe/p0"`，但默认前缀是 `"_probe."`（**点**）——
+于是没被识别为探针 topic，`dds_events` 变成 50 而非 40。
+
+**这个 bug 挺有意思**：它说明"命名约定必须一致"不是形式主义 ——
+一个字符的差别就让分类逻辑整体失效，而且**不报错**。
+
+### 四、12 个用例
+
+| 用例 | 关键验证 |
+|---|---|
+| SelfDiffHasNoDifference | 自己比自己 → 0 差异、退出码 0 |
+| CountDeltaIsExact | 100→80：delta=-20、delta_pct=-20.00% |
+| **DifferentStartSameContentIsNoDiff** | **起点差 1 小时、内容等价 → 报无差异**（相对对齐的硬判据） |
+| **TailEmptyIsDetected** | **条数都是 100 但分布不同 → 分桶检出**（修正后的关键验证） |
+| BucketZeroSkipsBucketing | `--bucket 0` 快速模式 |
+| ThreeModesBehave | payload none/hash/sample 三档 |
+| ProbeAndBizAreSeparated | 业务 40→20 检出，探针 10→10 不计入 |
+| EmptySessionsDoNotCrash | 两空 / 一空一非空 |
+| DurationWarningFires | 跨度差 50 倍 → warning |
+| TenTopicsThousandEvents | 10 topic × 1000 vs 900 |
+| RandomSpecsMultipleSeeds | 2 种子随机 |
+| UsageAndEnvErrors | USAGE×5 + NotFound×1，并断言**未创建**路径 |
+
+### 五、状态
+
+```
+全量 ctest: 58 / 58
+CLI 命令: 15 组（新增 diff）
+```
+
