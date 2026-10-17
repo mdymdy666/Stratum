@@ -63,9 +63,19 @@ int CmdMetrics(const std::vector<std::string>& args, GlobalOptions g) {
   // Prometheus 文本。若继承默认，用户"不加任何参数"却拿不到主要产物 ——
   // 那"默认"就失去意义了。所以这里用显式的 --json 切换。
   bool want_json = false;
+  // 探针 topic 前缀 —— 与 verify / diff 保持一致，便于跨命令对账
+  std::string probe_prefix = "_probe.";
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string& a = args[i];
     if (a == "--json") { want_json = true; continue; }
+    if (a == "--probe-prefix") {
+      if (i + 1 >= args.size()) {
+        return Fail(kUsage, "--probe-prefix 缺少参数值", "",
+                    "默认 _probe.（与 stratum probe / verify / diff 一致）");
+      }
+      probe_prefix = args[++i];
+      continue;
+    }
     if (a == "--session") {
       if (i + 1 >= args.size()) {
         return Fail(kUsage, "--session 缺少参数值", "", "");
@@ -109,6 +119,22 @@ int CmdMetrics(const std::vector<std::string>& args, GlobalOptions g) {
   (void)timeline.ListTopics(&topics);
 
   uint64_t sum_events = 0, sum_bytes = 0, with_def = 0;
+  // 业务层分类（与 verify / diff 同一套前缀约定）
+  uint64_t biz_events = 0, probe_events = 0;
+  size_t biz_topics = 0, probe_topics = 0;
+
+  for (const auto& t : topics) {
+    const bool is_probe = !probe_prefix.empty() &&
+                          t.topic_name.rfind(probe_prefix, 0) == 0;
+    if (is_probe) {
+      ++probe_topics;
+      probe_events += t.message_count;
+    } else {
+      ++biz_topics;
+      biz_events += t.message_count;
+    }
+  }
+
   for (const auto& t : topics) {
     sum_events += t.message_count;
     sum_bytes += t.byte_count;
@@ -141,6 +167,9 @@ int CmdMetrics(const std::vector<std::string>& args, GlobalOptions g) {
                 "\"topics_total\":%zu,\"topics_with_definition\":%llu,"
                 "\"integrity_issue\":%s,\"pruned_ranges_total\":%llu,"
                 "\"pruned_events_total\":%llu,\"control_events_total\":%zu,"
+                "\"business_events_total\":%llu,\"business_topics_total\":%zu,"
+                "\"probe_events_total\":%llu,\"probe_topics_total\":%zu,"
+                "\"probe_prefix\":\"%s\","
                 "\"topics\":[",
                 JsonEscape(session).c_str(),
                 static_cast<unsigned long long>(sum_events),
@@ -148,7 +177,10 @@ int CmdMetrics(const std::vector<std::string>& args, GlobalOptions g) {
                 static_cast<unsigned long long>(with_def),
                 integrity ? "true" : "false",
                 static_cast<unsigned long long>(pruned_ranges),
-                static_cast<unsigned long long>(pruned_events), events.size());
+                static_cast<unsigned long long>(pruned_events), events.size(),
+                static_cast<unsigned long long>(biz_events), biz_topics,
+                static_cast<unsigned long long>(probe_events), probe_topics,
+                JsonEscape(probe_prefix).c_str());
     for (size_t i = 0; i < topics.size(); ++i) {
       if (i) std::printf(",");
       std::printf("{\"topic\":\"%s\",\"type\":\"%s\",\"events\":%llu,"
@@ -187,6 +219,32 @@ int CmdMetrics(const std::vector<std::string>& args, GlobalOptions g) {
               sess.c_str(), static_cast<unsigned long long>(with_def));
 
   // 0/1 形式的告警指标：便于直接写告警规则（== 1 即告警）
+  // -------------------------------------------------------------------------
+  // 业务层指标（与 verify / diff 的 business_layer 对应）
+  //
+  // 【为什么只给条数与 topic 数，不给"失败条数"】
+  // 抓取端点必须便宜：Prometheus 默认 15s 抓一次。要数"探针里有多少条
+  // result=error"必须扫全量 payload，那会拖垮抓取。
+  // 深度信号留给 `verify --business-signals`（按需人工执行）。
+  // -------------------------------------------------------------------------
+  HelpType("stratum_business_events_total",
+           "业务 topic 的事件总数（不含探针 topic）", "gauge");
+  std::printf("stratum_business_events_total{session=\"%s\"} %llu\n",
+              sess.c_str(), static_cast<unsigned long long>(biz_events));
+
+  HelpType("stratum_business_topics_total", "业务 topic 数量", "gauge");
+  std::printf("stratum_business_topics_total{session=\"%s\"} %zu\n",
+              sess.c_str(), biz_topics);
+
+  HelpType("stratum_probe_events_total",
+           "探针 topic 的事件总数（前缀匹配 --probe-prefix）", "gauge");
+  std::printf("stratum_probe_events_total{session=\"%s\"} %llu\n",
+              sess.c_str(), static_cast<unsigned long long>(probe_events));
+
+  HelpType("stratum_probe_topics_total", "探针 topic 数量", "gauge");
+  std::printf("stratum_probe_topics_total{session=\"%s\"} %zu\n",
+              sess.c_str(), probe_topics);
+
   HelpType("stratum_integrity_issue",
            "会话是否存在完整性问题（1 = 有，需用 verify 查看归因）", "gauge");
   std::printf("stratum_integrity_issue{session=\"%s\"} %d\n", sess.c_str(),

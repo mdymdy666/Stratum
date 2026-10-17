@@ -226,3 +226,9 @@ stratum_add_test(test_diff_edge integration/test_diff_edge.cc integration cli)
 target_compile_definitions(test_diff_edge PRIVATE
     EDGE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
 set_tests_properties(test_diff_edge PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
+
+# metrics 的业务层指标：分层/与 verify 对账/两种输出一致/前缀可配/零值仍输出
+stratum_add_test(test_metrics_business integration/test_metrics_business.cc integration cli)
+target_compile_definitions(test_metrics_business PRIVATE
+    MB_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_metrics_business PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)

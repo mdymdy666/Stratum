@@ -9446,3 +9446,80 @@ CLI 命令: 15 组
 新增 4 个套件、19 个用例
 ```
 
+
+---
+
+## 2026-10-17（续 132）| metrics 加业务层指标（ctest 62 → 63）
+
+### 一、产出
+
+`cmd_metrics.cc` 新增 4 个指标 + `--probe-prefix`：
+
+```
+stratum_business_events_total{session}   业务 topic 的事件数
+stratum_business_topics_total{session}   业务 topic 数
+stratum_probe_events_total{session}      探针 topic 的事件数
+stratum_probe_topics_total{session}      探针 topic 数
+```
+
+现有 11 个指标**一个不动**（向后兼容）。
+
+### 二、为什么现在 Prometheus 能一条规则覆盖两种情况
+
+```
+# 数据断了
+rate(stratum_session_events_total[5m]) == 0
+
+# 只有探针数据、没有业务数据（这次新增的能力）
+stratum_probe_events_total > 0 and stratum_business_events_total == 0
+```
+
+第二种情况之前**监控完全看不见** —— 只知道"数据在增长"，
+不知道增长的全是探针、业务一条没有。
+
+### 三、★ 为什么只给条数，不给"失败条数"
+
+Prometheus 默认 **15s 抓一次**。要数"探针里有多少条 `result=error`"
+必须扫全量 payload —— 那会拖垮抓取端点。
+
+**正确分工**：
+
+| 场合 | 工具 | 成本 |
+|---|---|---|
+| 定期抓取 | `metrics`（结构性指标：条数、topic 数） | 便宜 |
+| 按需人工 | `verify --business-signals`（ok/error 分布） | 贵 |
+
+这是"性能与深度分离"的第三次应用（前两次：`--compare-payload`、`--business-signals`）。
+
+### 四、一个容易忽略的细节：零值必须输出
+
+```c
+STRATUM_CHECK_TRUE(r.output.find("stratum_probe_events_total{") != npos);
+STRATUM_CHECK_EQ(PickProm(...), 0LL);
+```
+
+**"指标值为 0"与"指标不存在"是两回事**：
+- 值为 0 → 告警规则 `== 0` 能触发
+- 指标缺失 → Prometheus 里这一系列直接消失，规则**静默失效**
+
+所以即使没有探针 topic，也必须输出 `0`。
+
+### 五、测试（5 用例，全部与既有命令对账）
+
+| 用例 | 验证 |
+|---|---|
+| LayersSeparated | 业务 60/3、探针 30/2、会话总数 90（不变） |
+| **ConsistentWithVerify** | **verify(dds=50,probe=12) == metrics(biz=50,probe=12)** |
+| JsonMatchesPrometheus | 两种输出四种指标值完全相同 |
+| CustomPrefixReclassifies | `--probe-prefix zzz.` → 探针归零、业务变 3 |
+| ZeroProbeStillReported | 无探针 topic 时输出 0 而非缺失 |
+
+`ConsistentWithVerify` 是这批里最有价值的：它把"三条命令对同一份数据的结论必须自洽"
+变成了持续验证。
+
+### 六、状态
+
+```
+全量 ctest: 63 / 63
+```
+
