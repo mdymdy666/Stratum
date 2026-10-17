@@ -220,3 +220,21 @@ target_link_libraries(stratum_types PUBLIC stratum_core)
 target_link_libraries(stratum_all INTERFACE
     stratum_types
 )
+
+# ---------------------------------------------------------------------------
+# 埋点模块：配置（自动生成 / 热重载 / 按 topic 覆盖 / 双语义错误处理）
+#
+# 需求依据 docs/13-probe-requirements.md（PR-05~09）。
+# 复用 config::IniFile 做解析底座（它已支持注释与分节），在其上叠轻量语义。
+# ---------------------------------------------------------------------------
+add_library(stratum_probe STATIC
+    src/probe/probe_config.cc
+)
+target_include_directories(stratum_probe PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(stratum_probe PUBLIC stratum_config)
+
+target_link_libraries(stratum_all INTERFACE
+    stratum_probe
+)

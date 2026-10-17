@@ -147,3 +147,6 @@ stratum_add_test(test_control_events unit/test_control_events.cc unit storage)
 # 因为这两个命令的逻辑在 CLI 层，单元测试链接不到；
 # 项目现有的 shell 场景脚本又不进 ctest，故用 C++ 包装以保证进质量门）
 stratum_add_test(test_cli_io_doctor integration/test_cli_io_doctor.cc integration cli)
+
+# 埋点配置：自动生成 / 热重载 / 双语义（全局 fail-safe vs 其余 fail-preserve）/ .lock
+stratum_add_test(test_probe_config unit/test_probe_config.cc unit probe)
