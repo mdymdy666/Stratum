@@ -164,3 +164,22 @@ target_compile_definitions(test_cli_probe PRIVATE
 # 这个用例会起真实进程并用 DDS 通信；与其余测试并行时抢 CPU 会让
 # 「等待 N 秒」这类时序不可靠。独占跑，结果才有意义。
 set_tests_properties(test_cli_probe PROPERTIES RUN_SERIAL TRUE)
+
+# ring 的边界行为：最小容量 / 序号回绕 / ring 复用 / 长度恰好到上限
+stratum_add_test(test_probe_boundary unit/test_probe_boundary.cc unit probe)
+
+# probe 子命令的参数与错误处理（只测解析与退出码，不起重资源）
+stratum_add_test(test_probe_cli_errors integration/test_probe_cli_errors.cc integration cli)
+target_compile_definitions(test_probe_cli_errors PRIVATE
+    PROBE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+
+# 多实例：不同容量/交叉写/per-ring 开关/共享与独立配置/单环多线程
+stratum_add_test(test_probe_instance unit/test_probe_instance.cc unit probe)
+
+# 热重载时序：连续改/中间态恢复/锁暂停与恢复/删除保留现状/计数累计
+stratum_add_test(test_probe_hot_reload unit/test_probe_hot_reload.cc unit probe)
+
+# status 边界：空 ring/全未配置/声明未见/scan-limit/环覆盖/两种格式
+stratum_add_test(test_probe_status_edge integration/test_probe_status_edge.cc integration cli)
+target_compile_definitions(test_probe_status_edge PRIVATE
+    PROBE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")

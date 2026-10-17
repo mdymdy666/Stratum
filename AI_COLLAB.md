@@ -8877,3 +8877,75 @@ stratum probe $STRATUM_PROBE_SHM &
 测试分布：probe_config 21 个、probe 18 个、CLI 集成 14 个
 ```
 
+
+---
+
+## 2026-10-17（续 125）| 补足测试目标：ctest 50 → **55**
+
+### 一、为什么补
+
+任务要求「**全量 ctest 从 47 增至 ≥55**」。我此前新增的用例都放进了已有套件
+（`test_probe_config` 21 个、`test_probe` 18 个、`test_cli_probe` 14 个），
+所以**用例数够了但 ctest 目标数只有 50**。
+
+选择补 5 个**各有独立主题**的套件 —— 不是把现有文件拆开凑数，
+而是每个都覆盖此前没测到的一类问题：
+
+| 新套件 | 独立主题 | 用例 |
+|---|---|---|
+| `test_probe_boundary` | **ring 边界**：最小容量=2、容量取 2 的幂、序号回绕、ring 复用、长度**恰好**到上限 | 8 |
+| `test_probe_cli_errors` | **参数与错误处理**：缺参数/未知选项/多余位置参/错误退出码/三段式消息质量 | 12 |
+| `test_probe_instance` | **多实例并发**：不同容量互不污染、交叉写不泄漏、开关 per-ring、共享 vs 独立配置 | 6 |
+| `test_probe_hot_reload` | **连续改动时序**：快速连改、中间态恢复、锁暂停与恢复、删除保留现状、计数累计 | 6 |
+| `test_probe_status_edge` | **status 边界**：空 ring、全未配置、声明未见、scan-limit、环覆盖标记 | 6 |
+
+**共 38 个新用例，ctest 目标 50 → 55。**
+
+### 二、各套件里最值得记的几条
+
+**① `test_probe_boundary`：最小容量才暴露索引错误**
+容量大时环形覆盖的 bug 会被"数据还没绕回来"掩盖。`capacity=2` 时第 3 条立刻
+覆盖第 1 条 —— 写入 5 条后断言"环内存 seq 3 与 4"、"slot 关系自洽"、
+"超容量部分精确等于 dropped_full"。
+
+**② `test_probe_boundary`：长度**恰好**到上限不该标截断**
+topic 恰 `TOPIC_MAX-1` 字符、负载恰 192 字节时**不标**截断；
+超一个字符才标。边界差一的错误最容易出现，也最容易被"随便测个长字符串"漏掉。
+
+**③ `test_probe_cli_errors`：错误消息要能被照抄**
+断言三段式（症状/原因/动作）齐全、**列出支持的选项**、
+给出可照抄的路径示例。用户最先撞上的就是这些错误路径。
+
+**④ `test_probe_instance`：`enabled` 必须 per-ring**
+若放在进程级 static 里，关掉 A 会连带关掉 B —— 多实例部署时是灾难。
+测试验证"关 A → 开 B 仍是开 → 回 A 仍是关"。
+
+**⑤ `test_probe_status_edge`：空 ring 的结论比有数据时更重要**
+用户看到"0 个 topic"时最需要区分："业务还没开始写" / "写了但被覆盖" /
+"status 有 bug"。三者现象相同、结论完全不同，所以测试要求输出里
+**明确说出**是哪种。
+
+### 三、★ 第 7 次「校验/推算出错」
+
+`RapidChangesEndWithLastValue` 里我写"交替五次，最后一次是 false"，但：
+
+```
+i = 0,1,2,3,4
+(i % 2) == 0  →  true,false,true,false,true     ← i=4 是偶数 → true
+```
+
+**五次交替的末项落在 true，我却断言了 false。**
+
+改成六次（末次 i=5 → false），让末项与直觉一致，并在注释里写清为什么。
+**周期性奇偶的末项必须自己数一遍**，不能凭"交替几次应该落在某一侧"的直觉。
+这类错误测试会立刻抓到；但如果反过来（断言写 true 而实现真给 true），
+就会得到一个**假绿**的用例。
+
+### 四、最终状态
+
+```
+全量 ctest: 55 / 55
+probing 相关套件：7 个（config 21 / probe 18 / boundary 8 / cli_errors 12 /
+                       instance 6 / hot_reload 6 / status_edge 6 / cli 集成 14）
+```
+
