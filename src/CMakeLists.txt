@@ -229,6 +229,7 @@ target_link_libraries(stratum_all INTERFACE
 # ---------------------------------------------------------------------------
 add_library(stratum_probe STATIC
     src/probe/probe_config.cc
+    src/probe/probe.c
 )
 target_include_directories(stratum_probe PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

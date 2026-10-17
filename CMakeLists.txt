@@ -13,7 +13,7 @@ cmake_minimum_required(VERSION 3.16)
 project(Stratum
         VERSION 0.1.0
         DESCRIPTION "面向 DDS 的可回溯数据平面"
-        LANGUAGES CXX)
+        LANGUAGES C CXX)
 
 # ---------------------------------------------------------------------------
 # 全局设置
