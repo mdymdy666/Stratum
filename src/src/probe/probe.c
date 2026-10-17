@@ -81,7 +81,6 @@ static _Atomic int g_init_attempted = 0;
 static _Atomic int g_open_failed = 0;
 
 static stratum_probe_stats g_stats;
-static _Atomic int g_sample_tick = 0;
 
 /* ------------------------------------------------------------------------- */
 /* 工具                                                                       */

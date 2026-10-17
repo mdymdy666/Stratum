@@ -150,3 +150,8 @@ stratum_add_test(test_cli_io_doctor integration/test_cli_io_doctor.cc integratio
 
 # 埋点配置：自动生成 / 热重载 / 双语义（全局 fail-safe vs 其余 fail-preserve）/ .lock
 stratum_add_test(test_probe_config unit/test_probe_config.cc unit probe)
+
+# 埋点库：环满覆盖、并发写、SCOPE(含异常路径)、PR-04 反汇编零开销
+stratum_add_test(test_probe unit/test_probe.cc unit probe)
+target_compile_definitions(test_probe PRIVATE
+    PROJECT_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/src/include")

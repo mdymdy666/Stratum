@@ -157,6 +157,19 @@ typedef struct stratum_probe_stats {
 
 void stratum_probe_get_stats(stratum_probe_stats* out);
 
+/* 读取器与测试用的计数视图。
+ *
+ * allocated：已分配的写入序号（写者递增，**可能包含尚未写完的记录**）
+ * committed：已提交的写入序号（到这里的记录一定完整）
+ *
+ * 【为什么两个都要暴露】读取器必须用 committed 做上界，
+ * 否则会读到"正在写"的槽位（环形覆盖时该槽可能正被重写）。 */
+uint64_t stratum_probe_allocated(void);
+uint64_t stratum_probe_committed(void);
+
+/* ring 头部只读视图（供读取器实现；普通业务代码不需要）。 */
+const void* stratum_probe_ring_view(void);
+
 /* 作用域计时的底层：写一条 "topic=... dur_us=..." 记录 */
 void stratum_probe_write_scope(const char* topic, uint64_t dur_ns);
 
