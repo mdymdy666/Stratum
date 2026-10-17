@@ -606,4 +606,111 @@ int main(void) {
   CleanEnv(env);
 }
 
+// ===========================================================================
+// 八、probe status：期望 vs 实际（PR-11）+ 未配置可见（PR-12）
+// ===========================================================================
+
+// 写 3 个 topic 的业务程序（前两个在配置里，第三个不在）
+static const char* kStatusBiz = R"(
+int main(void) {
+  if (stratum_probe_open(NULL) != 0) return 1;
+  for (int i = 0; i < 5; ++i) {
+    STRATUM_PROBE("alpha/one", "a");
+    STRATUM_PROBE("beta/two", "b");
+    STRATUM_PROBE("gamma/three", "c");
+  }
+  sleep(1);
+  stratum_probe_close();
+  return 0;
+}
+)";
+
+STRATUM_TEST(ProbeCliStatus, ReportsExpectedVsActual) {
+  const Env env = MakeEnv("st1");
+  const std::string biz = env.root + "/bizs";
+  std::string err;
+  STRATUM_CHECK_TRUE(BuildBizSim(biz, kStatusBiz, &err));
+
+  // 配置：alpha/one 开，beta/two 关，gamma/three 未声明
+  const std::string cfg = env.root + "/probe.ini";
+  {
+    std::ofstream o(cfg, std::ios::out | std::ios::trunc);
+    o << "[probe]\nenabled = true\n[defaults]\nenabled = true\n"
+      << "[topic.\"alpha/one\"]\nenabled = true\n"
+      << "[topic.\"beta/two\"]\nenabled = false\n";
+  }
+
+  const CliResult biz_r = RunCli("STRATUM_PROBE_SHM=" + env.shm + " " + biz);
+  STRATUM_CHECK_EQ(biz_r.code, 0);
+
+  // ★ 期望 vs 实际：beta/two 配置为关，但记录确实存在（写侧不看配置）
+  const CliResult s = RunCli(kCli + " --format table probe status " + env.shm + " --config " + cfg);
+  // 有未配置 topic → PARTIAL(5)
+  STRATUM_CHECK_EQ(s.code, 5);   // PARTIAL：有未配置 topic
+
+  // 三个 topic 都在报告里
+  STRATUM_CHECK_TRUE(s.output.find("alpha/one") != std::string::npos);
+  STRATUM_CHECK_TRUE(s.output.find("beta/two") != std::string::npos);
+  STRATUM_CHECK_TRUE(s.output.find("gamma/three") != std::string::npos);
+  // beta/two 被标为"配置为关"
+  STRATUM_CHECK_TRUE(s.output.find("[配置为关]") != std::string::npos);
+  std::printf("      [PR-11] beta/two 配置为关但仍有数据，状态里显式标注\n");
+
+  CleanEnv(env);
+}
+
+STRATUM_TEST(ProbeCliStatus, UnconfiguredTopicIsVisibleNotSilent) {
+  const Env env = MakeEnv("st2");
+  const std::string biz = env.root + "/bizs2";
+  std::string err;
+  STRATUM_CHECK_TRUE(BuildBizSim(biz, kStatusBiz, &err));
+
+  const std::string cfg = env.root + "/probe.ini";
+  {
+    std::ofstream o(cfg, std::ios::out | std::ios::trunc);
+    o << "[probe]\nenabled = true\n";
+  }
+
+  const CliResult biz_r = RunCli("STRATUM_PROBE_SHM=" + env.shm + " " + biz);
+  STRATUM_CHECK_EQ(biz_r.code, 0);
+
+  const CliResult s = RunCli(kCli + " --format table probe status " + env.shm + " --config " + cfg);
+
+  // ★ PR-12：未在配置中的 topic 必须**可见**，且给出可粘贴的片段
+  STRATUM_CHECK_TRUE(s.output.find("未出现在配置文件中") != std::string::npos);
+  STRATUM_CHECK_TRUE(s.output.find("gamma/three") != std::string::npos);
+  // 且必须声明"不会自动改写你的配置文件"
+  STRATUM_CHECK_TRUE(s.output.find("不会") != std::string::npos);
+  // JSON 里 observed_not_configured 非空
+  // JSON 检查用默认格式（就是 json）
+  const CliResult sj = RunCli(kCli + " probe status " + env.shm + " --config " + cfg);
+  STRATUM_CHECK_TRUE(sj.output.find("\"observed_not_configured\":[\"") != std::string::npos);
+  // JSON 模式下退出码也必须是 PARTIAL（退出码与格式无关）
+  STRATUM_CHECK_EQ(sj.code, 5);
+  std::printf("      [PR-12] 3 个未配置 topic 全部可见，且明确声明不改写用户配置\n");
+
+  CleanEnv(env);
+}
+
+STRATUM_TEST(ProbeCliStatus, WithoutConfigDoesNotClaimUnconfigured) {
+  // 【回归保护】没给 --config 时**不能**说"未在配置中" ——
+  // 那是把"没有配置可对比"讲成了"配置里缺这个"，语义完全不同。
+  const Env env = MakeEnv("st3");
+  const std::string biz = env.root + "/bizs3";
+  std::string err;
+  STRATUM_CHECK_TRUE(BuildBizSim(biz, kStatusBiz, &err));
+  const CliResult biz_r = RunCli("STRATUM_PROBE_SHM=" + env.shm + " " + biz);
+  STRATUM_CHECK_EQ(biz_r.code, 0);
+
+  const CliResult s = RunCli(kCli + " --format table probe status " + env.shm);
+  STRATUM_CHECK_TRUE(s.output.find("未在配置中") == std::string::npos);
+  // 但应说明"无法对比期望值"
+  STRATUM_CHECK_TRUE(s.output.find("未指定 --config") != std::string::npos);
+  // 无配置时不该返回 PARTIAL（没有"不一致"可言）
+  STRATUM_CHECK_EQ(s.code, 0);
+  std::printf("      [诚实] 无配置时不谎称『未在配置中』，返回 0\n");
+
+  CleanEnv(env);
+}
+
 STRATUM_TEST_MAIN()

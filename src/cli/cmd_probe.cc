@@ -169,6 +169,14 @@ bool SampleKeep(uint32_t seq, double rate) {
 }  // namespace
 
 int CmdProbe(const std::vector<std::string>& args, GlobalOptions g) {
+  // `stratum probe status ...` 是 probe 的子命令：转给专门的实现。
+  // 【为什么放在最前面】--config / --scan-limit 与读取器的选项不同，
+  // 早分派可以避免两套选项混在一起解析。
+  if (!args.empty() && args[0] == "status") {
+    const std::vector<std::string> tail(args.begin() + 1, args.end());
+    return CmdProbeStatus(tail, g);
+  }
+
   std::string shm;
   std::string config_path;
   std::string prefix = kDefaultTopicPrefix;

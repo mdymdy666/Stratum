@@ -180,6 +180,7 @@ int CmdIo(const std::vector<std::string>& args, GlobalOptions g);
 int CmdDoctor(const std::vector<std::string>& args, GlobalOptions g);
 int CmdMetrics(const std::vector<std::string>& args, GlobalOptions g);
 int CmdProbe(const std::vector<std::string>& args, GlobalOptions g);
+int CmdProbeStatus(const std::vector<std::string>& args, GlobalOptions g);
 
 // 尚未实现的子命令（明确报错，不静默）
 int CmdNotImplemented(const std::string& name);
