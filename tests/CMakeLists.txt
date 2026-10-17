@@ -161,3 +161,6 @@ stratum_add_test(test_cli_probe integration/test_cli_probe.cc integration probe 
 target_compile_definitions(test_cli_probe PRIVATE
     PROBE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum"
     PROBE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+# 这个用例会起真实进程并用 DDS 通信；与其余测试并行时抢 CPU 会让
+# 「等待 N 秒」这类时序不可靠。独占跑，结果才有意义。
+set_tests_properties(test_cli_probe PROPERTIES RUN_SERIAL TRUE)

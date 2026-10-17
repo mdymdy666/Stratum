@@ -254,26 +254,41 @@ int CmdProbe(const std::vector<std::string>& args, GlobalOptions g) {
   bool waited_for_new_ring = false;
   if (wait_seconds > 0 && ::access(shm.c_str(), F_OK) != 0) {
     waited_for_new_ring = true;
+  }
+
+  // 【关键】--wait 等的是"**可用的** ring"，不是"文件存在"。
+  //
+  // 业务侧 open(O_CREAT) 之后文件立刻出现，但 magic 要到 memset 之后才写好。
+  // 实测（ctest 并行时）会撞进这个窗口，报「magic 不符」。
+  // 所以这里循环"尝试打开"，成功才算到。
+  if (wait_seconds > 0) {
     if (!g.quiet) {
-      std::fprintf(stderr, "  [probe] 等待 ring 出现（最多 %d 秒）：%s\n",
+      std::fprintf(stderr, "  [probe] 等待可用 ring（最多 %d 秒）：%s\n",
                    wait_seconds, shm.c_str());
     }
     const auto wait_start = std::chrono::steady_clock::now();
-    while (::access(shm.c_str(), F_OK) != 0) {
+    while (true) {
+      if (OpenRingReadOnly(shm, &ring, &err)) break;
       const auto waited = std::chrono::duration_cast<std::chrono::seconds>(
                               std::chrono::steady_clock::now() - wait_start)
                               .count();
-      if (waited >= wait_seconds) break;
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      if (waited >= wait_seconds) {
+        return Fail(kEnv, "等待超时，没有得到可用的 probe ring: " + shm,
+                    "已等待 " + std::to_string(wait_seconds) + " 秒；最后一次原因: " + err,
+                    "确认业务进程确实调用过探针；若文件已存在但无效，"
+                    "可能是旧版本残留，删除后重试");
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    if (::access(shm.c_str(), F_OK) != 0) {
-      return Fail(kEnv, "等待超时，probe ring 仍未出现: " + shm,
-                  "已等待 " + std::to_string(wait_seconds) + " 秒",
-                  "确认业务进程确实调用过探针；或调大 --wait");
+    if (!g.quiet) std::fprintf(stderr, "  [probe] ring 可用\n");
+  } else if (waited_for_new_ring) {
+    // 理论上到不了这里；保留分支避免"未使用变量"的误解
+    if (!OpenRingReadOnly(shm, &ring, &err)) {
+      return Fail(kEnv, "无法读取 probe ring: " + shm, err,
+                  "确认业务进程已启动并调过探针；"
+                  "文件名形如 /dev/shm/stratum_probe.<pid>");
     }
-    if (!g.quiet) std::fprintf(stderr, "  [probe] ring 已出现\n");
-  }
-  if (!OpenRingReadOnly(shm, &ring, &err)) {
+  } else if (!OpenRingReadOnly(shm, &ring, &err)) {
     return Fail(kEnv, "无法读取 probe ring: " + shm, err,
                 "确认业务进程已启动并调过探针（它会在首次写入时创建该文件）；"
                 "文件名形如 /dev/shm/stratum_probe.<pid>");
