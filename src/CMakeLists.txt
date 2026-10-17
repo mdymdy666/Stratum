@@ -187,11 +187,19 @@ target_link_libraries(stratum_logging PUBLIC pthread)
 # 裁剪：RuntimeConfig 与 BindRuntimeConfig —— 它们绑定 Go2Cpp 的调度器，
 #       而 Stratum 没有调度器。裁掉后本模块零外部依赖。
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# config 已提取为独立、零依赖的库（standalone/config）。
+# 主项目直接引用它，**不再保留副本** —— 两份代码必然漂移。
+# 例外：BindLoggingConfig 被移除（它绑定 Stratum 的日志管理器，
+# 且全项目无调用点；如需要可基于新库重新实现，约 30 行）。
+# ---------------------------------------------------------------------------
+set(STRATUM_CONFIG_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../standalone/config)
 add_library(stratum_config STATIC
-    config/config.cpp
+    ${STRATUM_CONFIG_ROOT}/src/config.cpp
 )
 target_include_directories(stratum_config PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${STRATUM_CONFIG_ROOT}/include
 )
 target_link_libraries(stratum_config PUBLIC
     stratum_logging

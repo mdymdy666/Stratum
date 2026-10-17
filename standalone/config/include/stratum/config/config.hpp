@@ -14,7 +14,6 @@
 // 简单、可审查的 ini 配置。解析器只处理 section、key=value 和注释，避免
 // 引入 YAML 等重量依赖；运行时配置在加载后统一校验，再交给各模块应用。
 
-#include "stratum/log.hpp"
 
 #include <cstddef>
 #include <atomic>
@@ -34,6 +33,11 @@
 #include <unordered_map>
 #include <vector>
 
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <vector>
 namespace stratum::config {
 
 // 轻量 INI 解析器。依赖标准文件流和字符串容器，为上层配置中心提供
@@ -108,13 +112,22 @@ struct ValueCodec<bool> {
     }
 };
 
-template <>
-struct ValueCodec<log::Level> {
-    /** @brief 编码日志级别。 */
-    static std::string Encode(log::Level value) { return log::ToString(value); }
-    /** @brief 解析日志级别文本。 */
-    static bool Decode(const std::string& text, log::Level* value) { return log::ParseLevel(text, value); }
-};
+// ---------------------------------------------------------------------------
+// 【可选扩展点】为自定义类型支持配置值
+//
+// 主模板 ValueCodec<T>（见上）用 `operator<<` / `operator>>` 做转换，
+// 因此**任何支持流式输入输出的类型都能直接当配置值**（int / double / 自定义 struct 等）。
+//
+// 枚举类型通常没有流式操作符，需要自己特化：
+//
+//     template <>
+//     struct stratum::config::ValueCodec<MyEnum> {
+//       static std::string Encode(MyEnum v) { return ToString(v); }
+//       static bool Decode(const std::string& s, MyEnum* v) { return Parse(s, v); }
+//     };
+//
+// 注意特化必须在**使用之前**声明，通常放在自己的头文件里 include 进来。
+// ---------------------------------------------------------------------------
 
 template <typename T>
 struct ValueCodec<std::vector<T>> {
@@ -497,11 +510,9 @@ private:
     std::thread m_watcher;
 };
 
-// 把配置中心的动态变量接到 LoggerManager。config 为注册表；error 可为空。
 // 之后修改 ini 并由 watcher 重载，已存在的 Logger 会立即切换级别、格式、
 // 文件和 stdout 输出。
 /** @brief 将日志字段注册到配置系统。 */
-bool BindLoggingConfig(Config& config, std::string* error = nullptr);
 
 }  // namespace stratum::config
 

@@ -9,7 +9,7 @@
 //
 // 注意：MIT 许可要求保留上述版权声明，请勿删除。
 
-#include "stratum/config.hpp"
+#include "stratum/config/config.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -20,6 +20,11 @@
 #include <string_view>
 #include <thread>
 
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <vector>
 namespace stratum::config {
 namespace {
 
@@ -173,11 +178,37 @@ bool ReadSize(const IniFile& ini, const char* section, const char* key,
 struct FileStamp final {
     std::filesystem::file_time_type modified{};
     std::uintmax_t size{0};
+    // -----------------------------------------------------------------------
+    // 内容哈希：修掉「同尺寸改动被漏掉」的问题。
+    //
+    // 只比 (mtime, size) 不够：把 `port = 8080` 改成 `port = 9000`，
+    // 文件大小完全相同；若两次改动落在同一个 mtime 精度周期内
+    // （多数文件系统是秒级），stamp 不变 → 静默不重载。
+    //
+    // 「改一个数字」恰恰是最常见的配置修改，所以这个漏洞影响面很大，
+    // 而且表现成"热重载偶尔不生效"——用户只会觉得不可靠。
+    //
+    // 代价是每次轮询读一次文件。配置文件通常 < 10KB，微秒级，
+    // 用这点开销换正确性是值得的。
+    // -----------------------------------------------------------------------
+    std::uint64_t content_hash{0};
 
     bool operator==(const FileStamp& other) const noexcept {
-        return modified == other.modified && size == other.size;
+        return modified == other.modified && size == other.size &&
+               content_hash == other.content_hash;
     }
 };
+
+// FNV-1a 64：够快、够散、无依赖。用它只做"内容变没变"的判断，
+// 不用于任何安全用途。
+inline std::uint64_t HashBytes(const std::string& data) noexcept {
+    std::uint64_t h = 1469598103934665603ull;   // FNV offset basis
+    for (unsigned char c : data) {
+        h ^= static_cast<std::uint64_t>(c);
+        h *= 1099511628211ull;                  // FNV prime
+    }
+    return h;
+}
 
 bool ReadFileStamp(const std::string& path, FileStamp* stamp,
                    std::string* error) {
@@ -193,6 +224,19 @@ bool ReadFileStamp(const std::string& path, FileStamp* stamp,
         if (error) *error = "无法读取配置文件大小: " + path;
         return false;
     }
+    // 读内容算哈希 —— 见 FileStamp 里长注释：只比 (mtime, size)
+    // 会漏掉「同尺寸改动」，而这恰恰是最常见的配置修改方式。
+    std::string bytes;
+    {
+        std::ifstream in(path, std::ios::in | std::ios::binary);
+        if (!in) {
+            if (error) *error = "无法读取配置文件内容: " + path;
+            return false;
+        }
+        bytes.assign(std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>());
+    }
+    stamp->content_hash = HashBytes(bytes);
     return true;
 }
 
@@ -713,45 +757,6 @@ void Config::StopWatcher() {
     stop_watcher_locked();
 }
 
-/// 函数功能：完成 BindLoggingConfig 调用，读取或更新相关运行时状态。
-/// 执行流程：
-/// 1. 校验传入参数以及当前对象、线程和 Fiber 状态；
-/// 2. 按状态机规则获取必要的同步保护并执行核心操作；
-/// 3. 发布返回结果、处理异常或取消，并通知相关等待者。
-/// @param[in] config 调用方传入的参数，具体约束以头文件声明为准。
-/// @param[in] error 调用方传入的参数，具体约束以头文件声明为准。
-/// @return 返回值表示操作结果；void、构造函数和析构函数通过对象状态完成工作。
-/// @note 该函数遵循所属模块的生命周期与并发约束；失败路径不会遗留等待节点或锁。
-bool BindLoggingConfig(Config& config, std::string* error) {
-    auto level = config.Lookup<log::Level>("log.level", log::Level::Warn, "日志最低级别");
-    auto stdout_enabled = config.Lookup<bool>("log.stdout", false, "是否输出到 stdout");
-    auto directory = config.Lookup<std::string>("log.directory", "log", "日志目录");
-    auto file = config.Lookup<std::string>("log.file", "stratum.log", "日志文件名");
-    auto format = config.Lookup<std::string>("log.format", "{time} [{level}] {logger} ({file}:{line}) {message}\n", "日志格式");
-    if (!level || !stdout_enabled || !directory || !file || !format) {
-        if (error) *error = "日志配置变量类型冲突";
-        return false;
-    }
-    const std::weak_ptr<ConfigVar<log::Level>> weak_level = level;
-    const std::weak_ptr<ConfigVar<bool>> weak_stdout = stdout_enabled;
-    const std::weak_ptr<ConfigVar<std::string>> weak_directory = directory;
-    const std::weak_ptr<ConfigVar<std::string>> weak_file = file;
-    const std::weak_ptr<ConfigVar<std::string>> weak_format = format;
-    const auto apply = [weak_level, weak_stdout, weak_directory, weak_file, weak_format]() {
-        const auto current_level = weak_level.lock();
-        const auto current_stdout = weak_stdout.lock();
-        const auto current_directory = weak_directory.lock();
-        const auto current_file = weak_file.lock();
-        const auto current_format = weak_format.lock();
-        if (!current_level || !current_stdout || !current_directory || !current_file || !current_format) return;
-        log::LoggerManager::Instance().Configure(current_level->GetValue(), current_stdout->GetValue(),
-                                                  current_directory->GetValue(), current_file->GetValue(), current_format->GetValue());
-    };
-    level->AddListener([apply](const log::Level&, const log::Level&) { apply(); });
-    stdout_enabled->AddListener([apply](const bool&, const bool&) { apply(); });
-    directory->AddListener([apply](const std::string&, const std::string&) { apply(); });
-    file->AddListener([apply](const std::string&, const std::string&) { apply(); });
-    format->AddListener([apply](const std::string&, const std::string&) { apply(); });
-    apply();
-    return true;
-}}  // namespace stratum::config
+// BindLoggingConfig 已移到 Stratum 侧的 src/config/log_binding.cpp
+// （它绑定的是 Stratum 自己的日志管理器，不属于通用配置库）
+}  // namespace stratum::config

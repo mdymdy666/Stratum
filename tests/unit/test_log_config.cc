@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "stratum/config.hpp"
+#include "stratum/config/level_codec.hpp"
 #include "stratum/log.hpp"
 #include "test_framework.h"
 
