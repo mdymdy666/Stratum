@@ -292,6 +292,8 @@ struct DiffResult {
   std::vector<std::string> same;
   bool duration_warning = false;
   double duration_ratio = 1.0;
+  // 两侧跨度是否可比（一侧为 0 时不可比）
+  bool duration_comparable = true;
   bool any_difference = false;
 };
 
@@ -311,15 +313,31 @@ DiffResult CompareSessions(SessionSummary left, SessionSummary right,
   r.right = std::move(right);
 
   // 时长比：把"相对对齐的局限"变成一个可检查的信号
+  //
+  // 【语义】duration_ratio 只在**两侧都有跨度**时才有意义。
+  // 若一侧 span=0（空会话或所有事件同一时刻），比值是 0/0 或 x/0 —— 数学上无定义。
+  // 早期版本在这种情况下让 ratio 保持初始值 1.0，输出变成：
+  //     "duration_ratio":1.000, "duration_warning":true     ← 自相矛盾
+  // 1.0 意味着"两侧一样长"，而实际是一边有数据一边没有。
+  //
+  // 现在：不可比时 ratio=0 并置 duration_comparable=false，读取方能明确区分
+  // "比值恰好是 1.0"（可比且等长）与"无法比较"（0）。
   if (r.left.span_ns > 0 && r.right.span_ns > 0) {
     const double a = static_cast<double>(r.left.span_ns);
     const double b = static_cast<double>(r.right.span_ns);
     r.duration_ratio = (a > b) ? (a / b) : (b / a);
+    r.duration_comparable = true;
     // 相差一个数量级就警告：此时分桶对比会被拉伸/压扁影响
     r.duration_warning = (r.duration_ratio >= 10.0);
   } else if (r.left.span_ns != r.right.span_ns) {
-    // 一侧为 0：也算不可比
+    // 一侧为 0、另一侧非 0：不可比
+    r.duration_ratio = 0.0;
+    r.duration_comparable = false;
     r.duration_warning = true;
+  } else {
+    // 两侧都是 0（都空）：比值视为 1（等价），但也没有实际意义
+    r.duration_ratio = 1.0;
+    r.duration_comparable = true;
   }
 
   // 建索引
@@ -438,10 +456,11 @@ void PrintJson(const DiffResult& r, const std::string& payload_mode,
 
   std::printf("\"alignment\":{\"mode\":\"relative\",\"left_origin_ns\":%llu,"
               "\"right_origin_ns\":%llu,\"duration_ratio\":%.3f,"
-              "\"duration_warning\":%s},",
+              "\"duration_comparable\":%s,\"duration_warning\":%s},",
               static_cast<unsigned long long>(r.left.origin_ns),
               static_cast<unsigned long long>(r.right.origin_ns),
-              r.duration_ratio, r.duration_warning ? "true" : "false");
+              r.duration_ratio, r.duration_comparable ? "true" : "false",
+              r.duration_warning ? "true" : "false");
 
   auto PrintList = [](const std::vector<TopicDiff>& v, bool with_buckets) {
     for (size_t i = 0; i < v.size(); ++i) {
@@ -533,8 +552,13 @@ void PrintText(const DiffResult& r, const std::string& payload_mode,
   std::printf("  对齐: 相对时间（两侧 origin 不同，按各自起点算偏移）\n");
 
   if (r.duration_warning) {
-    std::printf("\n  ** 警告：两侧时长相差 %.1f 倍 **\n", r.duration_ratio);
-    std::printf("     分桶对比的结论可能被拉伸/压扁影响，请谨慎解读。\n");
+    if (!r.duration_comparable) {
+      std::printf("\n  ** 警告：一侧没有任何可测跨度（空会话或事件同一时刻）**\n");
+      std::printf("     无法比较两侧时长，分桶结论仅供参考。\n");
+    } else {
+      std::printf("\n  ** 警告：两侧时长相差 %.1f 倍 **\n", r.duration_ratio);
+      std::printf("     分桶对比的结论可能被拉伸/压扁影响，请谨慎解读。\n");
+    }
   }
 
   if (!r.added.empty()) {

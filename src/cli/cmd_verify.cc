@@ -347,6 +347,20 @@ int CmdVerify(const std::vector<std::string>& args, GlobalOptions g) {
                 "例如: stratum verify /data/stratum/s-20261014");
   }
 
+  // ---------------------------------------------------------------------------
+  // 【必须先预检】TimelineImplV2::Open 会**创建目录**。
+  // verify 是纯查询命令，对拼错的路径静默创建一个空会话、然后报"完整无问题" ——
+  // 这是最坏的结果：用户以为验证通过了，其实验证的是一个刚被自己创建的空目录。
+  //
+  // 项目纪律：查询类命令不得有创建副作用。
+  // （diff 有同样的问题、已修；发现一个命令违反纪律时要检查所有同类命令。）
+  // ---------------------------------------------------------------------------
+  if (!SessionExists(target)) {
+    return Fail(kNotFound, "会话不存在: " + target,
+                "该路径不是一个会话目录（verify 不会创建它）",
+                "用 `stratum session list <父目录>` 查看可用会话");
+  }
+
   TimelineImplV2 timeline;
   Status s = timeline.Open(target);
   if (!s.ok()) {

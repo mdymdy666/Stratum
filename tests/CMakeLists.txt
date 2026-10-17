@@ -201,3 +201,28 @@ stratum_add_test(test_diff integration/test_diff.cc integration cli)
 target_compile_definitions(test_diff PRIVATE
     DIFF_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
 set_tests_properties(test_diff PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+
+# 跨命令不变量：verify 与 diff 对同一份数据的结论必须自洽
+# （diff.events == verify.events、探针分类一致、无差异⇒结论一致）
+stratum_add_test(test_xcheck_verify_diff integration/test_xcheck_verify_diff.cc integration cli)
+target_compile_definitions(test_xcheck_verify_diff PRIVATE
+    XCHECK_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_xcheck_verify_diff PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
+
+# diff 的对称性与幂等性：自反/连比一致/方向互换后差异集合相同
+stratum_add_test(test_diff_symmetry integration/test_diff_symmetry.cc integration cli)
+target_compile_definitions(test_diff_symmetry PRIVATE
+    SYM_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_diff_symmetry PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
+
+# stdout 纯净性：stdout 是数据出口，日志/警告/错误只能在 stderr
+stratum_add_test(test_stdout_purity integration/test_stdout_purity.cc integration cli)
+target_compile_definitions(test_stdout_purity PRIVATE
+    PURITY_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_stdout_purity PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
+
+# diff 的算术边界：span=0 / 空左侧 / 单条 / bucket=1·1000 / 极端 payload / 双空
+stratum_add_test(test_diff_edge integration/test_diff_edge.cc integration cli)
+target_compile_definitions(test_diff_edge PRIVATE
+    EDGE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_diff_edge PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
