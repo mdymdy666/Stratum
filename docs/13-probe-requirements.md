@@ -418,7 +418,7 @@ Stratum 现在能零侵入地录**已经发布到 DDS** 的数据。但有一类
 | **PR-11** 期望 vs 实际 | ✅ | `probe status` 三方并列；`[配置为关]` / `[未在配置中]` 显式标注 |
 | **PR-12** 未配置探针可见 | ✅ | 列出并给出可粘贴片段；**明确声明不改写用户配置** |
 | **PR-13** `_probe.` 前缀 | ✅ | `_probe.it/work` / `_probe.it/detail` 均可见 |
-| **PR-14** 失败可区分 reason | ⚠️ **部分** | `Publish` 已区分 `buffered_pending`（尚无读者，正常）与真失败；格式不匹配的 4 种 reason 未单独实现 |
+| **PR-14** 失败可区分 reason | ✅ | `format_mismatch` / `payload_truncated` / `buffered_pending` 三类**分别计数**，不合并成笼统"失败"；首次失败打印 topic 与原因；有 format_mismatch 时退出码 PARTIAL。轻量 JSON 形状校验不引入解析器（合法 JSON 零误判，5 种形状已验证） |
 | **PR-15** 双时间戳 | ⚠️ **部分** | 记录结构里有 `ts_realtime_ns` + `ts_mono_ns`，但未单独断言两者关系 |
 | **PR-16** 多实例隔离 | ⚠️ **部分** | probe 层有隔离测试；**配置路径按实例区分未实现**（默认 `STRATUM_PROBE_SHM` 环境变量） |
 

@@ -67,7 +67,12 @@ struct ProbeReaderStats {
   uint64_t dropped_behind = 0;   // 落后超过一圈，被覆盖
   uint64_t publish_failed = 0;   // DDS 发布**真失败**
   uint64_t buffered_pending = 0; // 尚无匹配读者，数据已缓存待补发（正常状态）
-  uint64_t truncated = 0;        // 负载被探针侧截断
+  uint64_t truncated = 0;        // 负载被探针侧截断（写侧 flags bit0）
+  // PR-14：失败必须能区分。这三类**不能**合并成一个"失败"计数，
+  // 否则排障时无法判断是"格式不对"还是"数据被截断"。
+  uint64_t reason_format_mismatch = 0;  // 声明 json 但内容不是
+  uint64_t reason_payload_truncated = 0; // 因截断而跳过的条数（当 format 要求完整时）
+  uint64_t reason_unknown_probe = 0;     // 配置里没有、且策略要求拒绝
 };
 
 // 一个已打开的 ring 的只读视图
@@ -158,6 +163,44 @@ protocol::ReceivedSample ToSample(const stratum_probe_record& r,
 
 // 采样判断：读取器侧也要做（写侧已经做过一次，但配置可能变过）。
 // 用序号做确定性采样 —— 同一序号在不同进程/不同时刻的判断一致，便于复现。
+// 轻量 JSON 形状检查。
+//
+// 【为什么不用真解析器】读取器是热路径上的转发器，不该为校验付出完整解析的代价。
+// 我们要判的是"明显不像 JSON"，不是"完全符合 RFC 8259"。
+// 因此：合法 JSON 不会误判；明显错误（不以 { 或 [ 开头、括号不配对、
+// 引号未闭合）能被抓到 —— 这正好覆盖"声明 json 实际发的是二进制"这个场景。
+bool LooksLikeJson(const char* data, size_t len) {
+  if (len == 0) return false;
+  size_t b = 0, e = len;
+  while (b < e && (data[b] == ' ' || data[b] == '\t' || data[b] == '\n' ||
+                   data[b] == '\r')) ++b;
+  while (e > b && (data[e - 1] == ' ' || data[e - 1] == '\t' ||
+                   data[e - 1] == '\n' || data[e - 1] == '\r')) --e;
+  if (b >= e) return false;
+  if (data[b] != '{' && data[b] != '[') return false;
+  if (data[e - 1] != '}' && data[e - 1] != ']') return false;
+
+  int depth = 0;
+  bool in_str = false;
+  bool esc = false;
+  for (size_t i = b; i < e; ++i) {
+    const char c = data[i];
+    if (in_str) {
+      if (esc) { esc = false; continue; }
+      if (c == '\\') { esc = true; continue; }
+      if (c == '"') in_str = false;
+      continue;
+    }
+    if (c == '"') { in_str = true; continue; }
+    if (c == '{' || c == '[') ++depth;
+    else if (c == '}' || c == ']') {
+      --depth;
+      if (depth < 0) return false;
+    }
+  }
+  return depth == 0 && !in_str;
+}
+
 bool SampleKeep(uint32_t seq, double rate) {
   if (rate >= 1.0) return true;
   if (rate <= 0.0) return false;
@@ -410,7 +453,26 @@ int CmdProbe(const std::vector<std::string>& args, GlobalOptions g) {
         } else if (!SampleKeep(rec->seq, ts.sample_rate)) {
           ++st.skipped_sampled;
           keep = false;
+        } else if (ts.format == "json" &&
+                   !LooksLikeJson(rec->payload, rec->payload_len)) {
+          // PR-14：声明 json 但内容不像 —— 跳过并**单独计数**。
+          //
+          // 【为什么不发出去】发了下游会拿到"看起来有数据"的垃圾，
+          // 比明确报错危险得多：明确报错会有人去查，静默垃圾不会。
+          ++st.reason_format_mismatch;
+          if (st.reason_format_mismatch == 1) {
+            std::fprintf(stderr,
+                         "  [probe] 首条 format_mismatch: topic=%s "
+                         "声明 format=json 但内容不像 JSON（payload_len=%u）\n",
+                         topic.c_str(), rec->payload_len);
+          }
+          keep = false;
         }
+      }
+      // 截断单独计数：它说明"数据本来更长"，与格式错误是两回事
+      if (keep && (rec->flags & 1u) != 0) {
+        ++st.reason_payload_truncated;
+        // 截断的数据仍然发出（业务可能只关心前缀），但要计数让运维知道
       }
       if (keep) {
         if (dry_run) {
@@ -489,7 +551,8 @@ int CmdProbe(const std::vector<std::string>& args, GlobalOptions g) {
                 "\"read_ok\":%llu,\"published\":%llu,\"skipped_disabled\":%llu,"
                 "\"skipped_sampled\":%llu,\"dropped_behind\":%llu,"
                 "\"publish_failed\":%llu,\"buffered_pending\":%llu,"
-                "\"truncated\":%llu}\n",
+                "\"truncated\":%llu,\"reason_format_mismatch\":%llu,"
+                "\"reason_payload_truncated\":%llu}\n",
                 JsonEscape(shm).c_str(), domain,
                 static_cast<unsigned long long>(st.read_ok),
                 static_cast<unsigned long long>(st.published),
@@ -498,7 +561,9 @@ int CmdProbe(const std::vector<std::string>& args, GlobalOptions g) {
                 static_cast<unsigned long long>(st.dropped_behind),
                 static_cast<unsigned long long>(st.publish_failed),
                 static_cast<unsigned long long>(st.buffered_pending),
-                static_cast<unsigned long long>(st.truncated));
+                static_cast<unsigned long long>(st.truncated),
+                static_cast<unsigned long long>(st.reason_format_mismatch),
+                static_cast<unsigned long long>(st.reason_payload_truncated));
   } else if (!g.quiet) {
     std::fprintf(stderr, "\n读取结束\n");
     std::fprintf(stderr, "  读入:     %llu 条\n",
@@ -531,10 +596,28 @@ int CmdProbe(const std::vector<std::string>& args, GlobalOptions g) {
       std::fprintf(stderr, "  负载被截断:     %llu 条\n",
                    static_cast<unsigned long long>(st.truncated));
     }
+    // PR-14：把 reason 分开列出，让排障的人一眼看出是哪一类问题
+    if (st.reason_format_mismatch) {
+      std::fprintf(stderr,
+                   "  格式不匹配跳过: %llu 条（声明 format=json 但内容不是 JSON）\n",
+                   static_cast<unsigned long long>(st.reason_format_mismatch));
+    }
+    if (st.reason_payload_truncated) {
+      std::fprintf(stderr,
+                   "  已截断仍发送:   %llu 条（原负载超过 %d 字节上限）\n",
+                   static_cast<unsigned long long>(st.reason_payload_truncated),
+                   STRATUM_PROBE_PAYLOAD_MAX);
+    }
   }
 
   // 有丢弃/失败 → PARTIAL，让脚本能察觉
-  if (st.publish_failed > 0 || st.dropped_behind > 0) return kPartial;
+  // 有任何"数据没能完整送到下游"的情况都是 PARTIAL：
+  // 真失败、落后被覆盖、格式不匹配被跳过 —— 三者原因不同，但都意味着
+  // 下游看到的数据比业务产生的少。
+  if (st.publish_failed > 0 || st.dropped_behind > 0 ||
+      st.reason_format_mismatch > 0) {
+    return kPartial;
+  }
   return kOk;
 }
 

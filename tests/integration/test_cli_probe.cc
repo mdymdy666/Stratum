@@ -713,4 +713,106 @@ STRATUM_TEST(ProbeCliStatus, WithoutConfigDoesNotClaimUnconfigured) {
   CleanEnv(env);
 }
 
+// ===========================================================================
+// 九、PR-14：format 不匹配必须可区分，且单条失败不拖垮整体
+// ===========================================================================
+//
+// 【为什么值得测】配置声明 format=json，业务发的却是二进制。
+// 若读取器不校验，下游会拿到一堆"看起来有数据"的垃圾 ——
+// **比明确报错危险得多**：明确报错会有人去查，静默垃圾不会。
+//
+// 同时要验证"单条失败不拖垮整体"：坏的那条被跳过，好的那条照发。
+
+STRATUM_TEST(ProbeCliFormat, MismatchIsSkippedAndCountedSeparately) {
+  const Env env = MakeEnv("fmt");
+
+  // 业务：一个发合法 JSON，一个发二进制
+  const char* body = R"(
+int main(void) {
+  if (stratum_probe_open(NULL) != 0) return 1;
+  for (int i = 0; i < 5; ++i) {
+    STRATUM_PROBE("good/json", "{\"i\":1,\"ok\":true}");
+    const unsigned char bin[8] = {0xff, 0x00, 0x81, 0x7f, 0x01, 0x00, 0xfe, 0x02};
+    stratum_probe_write("bad/json", bin, sizeof(bin));
+  }
+  sleep(1);
+  stratum_probe_close();
+  return 0;
+}
+)";
+  const std::string biz = env.root + "/bizfmt";
+  std::string err;
+  STRATUM_CHECK_TRUE(BuildBizSim(biz, body, &err));
+
+  // 配置：两个 topic 都声明 json
+  const std::string cfg = env.root + "/probe.ini";
+  {
+    std::ofstream o(cfg, std::ios::out | std::ios::trunc);
+    o << "[probe]\nenabled = true\n"
+      << "[topic.\"good/json\"]\nenabled = true\nformat = \"json\"\n"
+      << "[topic.\"bad/json\"]\nenabled = true\nformat = \"json\"\n";
+  }
+
+  const CliResult biz_r = RunCli("STRATUM_PROBE_SHM=" + env.shm + " " + biz);
+  STRATUM_CHECK_EQ(biz_r.code, 0);
+
+  const CliResult p = RunCli(kCli + " probe " + env.shm + " --once --dry-run --config " + cfg);
+
+  // ★ 1) 退出码必须是 PARTIAL：有数据没能送到下游
+  STRATUM_CHECK_EQ(p.code, 5);
+
+  // ★ 2) 十条都读到了，但只发了五条好的
+  STRATUM_CHECK_EQ(PickInt(p.output, "read_ok"), 10LL);
+  STRATUM_CHECK_EQ(PickInt(p.output, "published"), 5LL);
+
+  // ★ 3) reason 必须**单独计数**，不能并进笼统的"失败"
+  STRATUM_CHECK_EQ(PickInt(p.output, "reason_format_mismatch"), 5LL);
+
+  // ★ 4) 首次失败要打印原因（不然排障只能猜）
+  STRATUM_CHECK_TRUE(p.output.find("format_mismatch") != std::string::npos);
+  STRATUM_CHECK_TRUE(p.output.find("bad/json") != std::string::npos);
+
+  std::printf("      [PR-14] 10 条读入、5 条发出、5 条 format_mismatch 单独计数、退出码 PARTIAL\n");
+  CleanEnv(env);
+}
+
+STRATUM_TEST(ProbeCliFormat, ValidJsonIsNotRejected) {
+  // 反向保护：合法 JSON 不能被误判（否则校验器本身成了 bug 源）
+  const Env env = MakeEnv("fmt2");
+  const char* body = R"(
+int main(void) {
+  if (stratum_probe_open(NULL) != 0) return 1;
+  // 各种合法形状：对象、数组、带转义、带嵌套、带空白
+  STRATUM_PROBE("ok/a", "{\"a\":1}");
+  STRATUM_PROBE("ok/b", "[1,2,3]");
+  STRATUM_PROBE("ok/c", "{\"s\":\"has \\\"quote\\\" inside\"}");
+  STRATUM_PROBE("ok/d", "{\"n\":{\"m\":[{\"x\":null}]}}");
+  STRATUM_PROBE("ok/e", "  {\"spaced\":true}  ");
+  sleep(1);
+  stratum_probe_close();
+  return 0;
+}
+)";
+  const std::string biz = env.root + "/bizok";
+  std::string err;
+  STRATUM_CHECK_TRUE(BuildBizSim(biz, body, &err));
+
+  const std::string cfg = env.root + "/probe.ini";
+  {
+    std::ofstream o(cfg, std::ios::out | std::ios::trunc);
+    o << "[probe]\nenabled = true\n[defaults]\nformat = \"json\"\n";
+  }
+
+  const CliResult biz_r = RunCli("STRATUM_PROBE_SHM=" + env.shm + " " + biz);
+  STRATUM_CHECK_EQ(biz_r.code, 0);
+
+  const CliResult p = RunCli(kCli + " probe " + env.shm + " --once --dry-run --config " + cfg);
+  // 5 条全部通过，零误判
+  STRATUM_CHECK_EQ(PickInt(p.output, "published"), 5LL);
+  STRATUM_CHECK_EQ(PickInt(p.output, "reason_format_mismatch"), 0LL);
+  STRATUM_CHECK_EQ(p.code, 0);
+  std::printf("      [PR-14] 5 种合法 JSON 形状全部通过，零误判\n");
+  CleanEnv(env);
+}
+
 STRATUM_TEST_MAIN()
