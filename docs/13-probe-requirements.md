@@ -420,7 +420,7 @@ Stratum 现在能零侵入地录**已经发布到 DDS** 的数据。但有一类
 | **PR-13** `_probe.` 前缀 | ✅ | `_probe.it/work` / `_probe.it/detail` 均可见 |
 | **PR-14** 失败可区分 reason | ✅ | `format_mismatch` / `payload_truncated` / `buffered_pending` 三类**分别计数**，不合并成笼统"失败"；首次失败打印 topic 与原因；有 format_mismatch 时退出码 PARTIAL。轻量 JSON 形状校验不引入解析器（合法 JSON 零误判，5 种形状已验证） |
 | **PR-15** 双时间戳 | ⚠️ **部分** | 记录结构里有 `ts_realtime_ns` + `ts_mono_ns`，但未单独断言两者关系 |
-| **PR-16** 多实例隔离 | ⚠️ **部分** | probe 层有隔离测试；**配置路径按实例区分未实现**（默认 `STRATUM_PROBE_SHM` 环境变量） |
+| **PR-16** 多实例隔离 | ✅ | **`STRATUM_PROBE_SHM` 区分 ring + `STRATUM_PROBE_CONFIG` 区分配置**；显式 `--config` 优先于环境变量；输出 `config_source` 说明来源。**刻意不用"默认路径含 pid"** —— 业务与读取器是不同进程，pid 必然不同，那样两侧永远读不到同一份配置 |
 
 ### 7.2 实测性能
 

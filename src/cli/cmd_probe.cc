@@ -31,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
@@ -349,7 +350,33 @@ int CmdProbe(const std::vector<std::string>& args, GlobalOptions g) {
   probe::ProbeConfig cfg;
   // 【注意】不能用 SessionExists —— 那是查"会话目录"的；
   // 这里要的是配置文件，存在与否由 Load 的分支自行判断（kMissing 也算正常）。
+  //
+  // PR-16 多实例隔离：显式 --config 优先，其次读 STRATUM_PROBE_CONFIG 环境变量。
+  //
+  // 【为什么用环境变量而不是"默认路径含 pid"】
+  // 业务与读取器是**两个不同进程**，pid 必然不同 ——
+  // 默认路径若含 pid，两侧永远读不到同一份配置。
+  // 环境变量是唯一能跨进程共享的机制（同一个 shell 里启动即共享）。
+  std::string cfg_source;
+  if (!config_path.empty()) {
+    cfg_source = "--config";
+  } else {
+    const char* env_cfg = ::getenv("STRATUM_PROBE_CONFIG");
+    if (env_cfg != nullptr && env_cfg[0] != '\0') {
+      config_path = env_cfg;
+      cfg_source = "STRATUM_PROBE_CONFIG";
+      if (!g.quiet) {
+        std::fprintf(stderr, "  [probe] 使用环境变量中的配置: %s\n",
+                     config_path.c_str());
+      }
+    }
+  }
   const bool have_cfg = !config_path.empty();
+  if (!have_cfg && !g.quiet) {
+    std::fprintf(stderr,
+                 "  [提示] 未指定配置（--config 或 STRATUM_PROBE_CONFIG），"
+                 "所有 topic 都会发出，不做开关/格式过滤\n");
+  }
   if (have_cfg) {
     const probe::LoadReport rep = cfg.Load(config_path);
     if (rep.outcome == probe::LoadOutcome::kParseError) {
@@ -548,12 +575,14 @@ int CmdProbe(const std::vector<std::string>& args, GlobalOptions g) {
 
   if (g.format == Format::kJson) {
     std::printf("{\"schema_version\":1,\"shm\":\"%s\",\"domain\":%u,"
+                "\"config_source\":\"%s\","
                 "\"read_ok\":%llu,\"published\":%llu,\"skipped_disabled\":%llu,"
                 "\"skipped_sampled\":%llu,\"dropped_behind\":%llu,"
                 "\"publish_failed\":%llu,\"buffered_pending\":%llu,"
                 "\"truncated\":%llu,\"reason_format_mismatch\":%llu,"
                 "\"reason_payload_truncated\":%llu}\n",
                 JsonEscape(shm).c_str(), domain,
+                cfg_source.empty() ? "none" : JsonEscape(cfg_source).c_str(),
                 static_cast<unsigned long long>(st.read_ok),
                 static_cast<unsigned long long>(st.published),
                 static_cast<unsigned long long>(st.skipped_disabled),

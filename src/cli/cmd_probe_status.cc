@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <map>
@@ -192,6 +193,11 @@ int CmdProbeStatus(const std::vector<std::string>& args, GlobalOptions g) {
   // 3) 读配置（期望值）
   // ---------------------------------------------------------------------
   probe::ProbeConfig cfg;
+  // 与 cmd_probe.cc 一致：--config 优先，其次环境变量（PR-16 多实例隔离）
+  if (config_path.empty()) {
+    const char* env_cfg = ::getenv("STRATUM_PROBE_CONFIG");
+    if (env_cfg != nullptr && env_cfg[0] != '\0') config_path = env_cfg;
+  }
   bool have_cfg = !config_path.empty();
   probe::LoadOutcome cfg_outcome = probe::LoadOutcome::kMissing;
   std::string cfg_detail;

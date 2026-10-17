@@ -815,4 +815,100 @@ int main(void) {
   CleanEnv(env);
 }
 
+// ===========================================================================
+// 十、PR-16：多实例配置靠环境变量区分
+// ===========================================================================
+//
+// 【为什么不是"默认路径含 pid"】业务与读取器是两个不同进程，pid 必然不同，
+// 默认路径若含 pid 两侧永远读不到同一份配置。环境变量是唯一能跨进程共享的机制。
+
+STRATUM_TEST(ProbeCliEnvConfig, EnvVarProvidesConfig) {
+  const Env env = MakeEnv("env1");
+
+  const char* body = R"(
+int main(void) {
+  if (stratum_probe_open(NULL) != 0) return 1;
+  for (int i = 0; i < 4; ++i) {
+    STRATUM_PROBE("env/on", "x");
+    STRATUM_PROBE("env/off", "y");
+  }
+  sleep(1);
+  stratum_probe_close();
+  return 0;
+}
+)";
+  const std::string biz = env.root + "/bize";
+  std::string err;
+  STRATUM_CHECK_TRUE(BuildBizSim(biz, body, &err));
+
+  const std::string cfg = env.root + "/probe.ini";
+  {
+    std::ofstream o(cfg, std::ios::out | std::ios::trunc);
+    o << "[probe]\nenabled = true\n"
+      << "[topic.\"env/on\"]\nenabled = true\n"
+      << "[topic.\"env/off\"]\nenabled = false\n";
+  }
+
+  const CliResult biz_r = RunCli("STRATUM_PROBE_SHM=" + env.shm + " " + biz);
+  STRATUM_CHECK_EQ(biz_r.code, 0);
+
+  // 不传 --config，靠环境变量
+  const CliResult p = RunCli("STRATUM_PROBE_CONFIG=" + cfg + " " + kCli +
+                             " probe " + env.shm + " --once --dry-run");
+  STRATUM_CHECK_EQ(p.code, 0);
+  STRATUM_CHECK_EQ(PickInt(p.output, "read_ok"), 8LL);
+  STRATUM_CHECK_EQ(PickInt(p.output, "published"), 4LL);          // 只有 env/on
+  STRATUM_CHECK_EQ(PickInt(p.output, "skipped_disabled"), 4LL);   // env/off 被关
+  STRATUM_CHECK_TRUE(p.output.find("\"config_source\":\"STRATUM_PROBE_CONFIG\"") !=
+                     std::string::npos);
+  std::printf("      [PR-16] 环境变量指定配置生效：8 条读入、4 条发出、4 条按配置关闭\n");
+  CleanEnv(env);
+}
+
+STRATUM_TEST(ProbeCliEnvConfig, ExplicitConfigBeatsEnvVar) {
+  const Env env = MakeEnv("env2");
+
+  const char* body = R"(
+int main(void) {
+  if (stratum_probe_open(NULL) != 0) return 1;
+  for (int i = 0; i < 4; ++i) {
+    STRATUM_PROBE("env/on", "x");
+    STRATUM_PROBE("env/off", "y");
+  }
+  sleep(1);
+  stratum_probe_close();
+  return 0;
+}
+)";
+  const std::string biz = env.root + "/bize2";
+  std::string err;
+  STRATUM_CHECK_TRUE(BuildBizSim(biz, body, &err));
+
+  // 环境变量里的配置会关掉 env/off
+  const std::string cfg_env = env.root + "/env.ini";
+  {
+    std::ofstream o(cfg_env, std::ios::out | std::ios::trunc);
+    o << "[probe]\nenabled = true\n[topic.\"env/off\"]\nenabled = false\n";
+  }
+  // 显式参数里的配置不关任何东西
+  const std::string cfg_arg = env.root + "/arg.ini";
+  {
+    std::ofstream o(cfg_arg, std::ios::out | std::ios::trunc);
+    o << "[probe]\nenabled = true\n";
+  }
+
+  const CliResult biz_r = RunCli("STRATUM_PROBE_SHM=" + env.shm + " " + biz);
+  STRATUM_CHECK_EQ(biz_r.code, 0);
+
+  const CliResult p = RunCli("STRATUM_PROBE_CONFIG=" + cfg_env + " " + kCli +
+                             " probe " + env.shm + " --once --dry-run --config " + cfg_arg);
+  STRATUM_CHECK_EQ(p.code, 0);
+  // 显式参数胜出：什么都不关
+  STRATUM_CHECK_EQ(PickInt(p.output, "skipped_disabled"), 0LL);
+  STRATUM_CHECK_EQ(PickInt(p.output, "published"), 8LL);
+  STRATUM_CHECK_TRUE(p.output.find("\"config_source\":\"--config\"") != std::string::npos);
+  std::printf("      [PR-16] 显式 --config 优先于环境变量：8 条全部发出\n");
+  CleanEnv(env);
+}
+
 STRATUM_TEST_MAIN()

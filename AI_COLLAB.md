@@ -8817,3 +8817,63 @@ PR-01 ~ PR-15：✅ 全部完成
 PR-16（配置路径按实例区分）：⚠️ 部分 —— 目前靠 STRATUM_PROBE_SHM 环境变量区分
 ```
 
+
+---
+
+## 2026-10-17（续 124）| PR-16 完成 —— **PR-01~16 全部落地**
+
+### 一、PR-16：多实例隔离
+
+**实现方式与 docs/13 S09 的原始设想不同，原因值得记下来：**
+
+原文写"默认路径含实例标识（如 `stratum_probe.<pid>.toml`）"。实现时发现这是**错的**：
+
+```
+业务进程 pid = 1234  → 默认路径 stratum_probe.1234.toml
+读取器进程 pid = 5678 → 默认路径 stratum_probe.5678.toml
+```
+
+业务与读取器是**两个不同进程**，pid 必然不同 ——
+**"默认路径含 pid"会让两侧永远读不到同一份配置。**
+
+**正确做法**：靠**环境变量**（唯一能跨进程共享的机制）：
+
+```
+export STRATUM_PROBE_SHM=/dev/shm/stratum_probe_a     # 区分 ring
+export STRATUM_PROBE_CONFIG=/etc/stratum/probe-a.toml  # 区分配置
+./biz_a &
+stratum probe $STRATUM_PROBE_SHM &
+```
+
+### 二、实测
+
+```
+① 环境变量指定配置：
+   config_source="STRATUM_PROBE_CONFIG", read_ok=8, published=4, skipped_disabled=4
+② 显式 --config 优先于环境变量：
+   config_source="--config", skipped_disabled=0（全部发出）
+③ 都不给：
+   提示"所有 topic 都会发出，不做过滤", config_source="none"
+```
+
+### 三、设计要点：配置来源必须可见
+
+输出里有 `config_source` 字段（`--config` / `STRATUM_PROBE_CONFIG` / `none`）。
+
+**理由**：运维改了环境变量却没生效时，如果没有这个字段就无从判断 ——
+是没读到环境变量？还是读到了但被显式参数覆盖？还是根本没传？
+三种情况的现象完全一样（都是"配置没生效"），但处理动作完全不同。
+
+### 四、完成度总表
+
+| 状态 | 需求 |
+|---|---|
+| ✅ **全部完成（16 项）** | **PR-01 ~ PR-16** |
+
+```
+阶段一：docs/13-probe-requirements.md（12 场景 / 16 需求）
+阶段二：config 增强 + 探针库 + 读取器 + status
+全量 ctest：50 / 50
+测试分布：probe_config 21 个、probe 18 个、CLI 集成 14 个
+```
+
