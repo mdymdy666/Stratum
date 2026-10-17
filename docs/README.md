@@ -31,6 +31,7 @@
 | [`09-cli-scenarios-deep.md`](09-cli-scenarios-deep.md) | **32 场景再发散**：边界分支 / 失败模式 / 场景交互，回收 18 条新约束 |
 | [`11-type-system.md`](11-type-system.md) | **类型系统的决策与已知边界**：定义格式选型（简化自描述）、两处已知有损、元数据独立 key 约定、端到端链路现状 |
 | [`12-roadmap.md`](12-roadmap.md) | **进度快照与下一步任务**：当前状态、已完成清单、用户期望（eBPF/topic 动态检测）及评估、三层下一步任务、遗留问题、方法学纪律 |
+| [`13-probe-requirements.md`](13-probe-requirements.md) | **埋点工程需求分析**：12 个真实场景（含监控回调/格式动态指定/QoS 动态调配/topic 动态配置）、16 条需求（PR-01~16）、边界与非目标 |
 | [`handoff-readme.md`](handoff-readme.md) | 历史：本项目早期的"文档集索引"（已由根 README 取代） |
 
 ---
