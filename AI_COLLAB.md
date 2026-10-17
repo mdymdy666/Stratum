@@ -8949,3 +8949,60 @@ probing 相关套件：7 个（config 21 / probe 18 / boundary 8 / cli_errors 12
                        instance 6 / hot_reload 6 / status_edge 6 / cli 集成 14）
 ```
 
+
+---
+
+## 2026-10-17（续 126）| 补 TSan 验证：probe 从未被覆盖过
+
+### 一、被用户一句"这么快完成了吗"问出的疏漏
+
+用户问这句话后，我做了逐项核对，发现三个真空白：
+
+```
+✗ TSan 从未覆盖 probe —— 而 probe.c 有原子操作 + 多线程写路径
+✗ 没有 soak 测试 —— 最长只跑了 14 秒
+✗ 没有真实业务接入 —— 全是 gcc 现场编译的模拟程序
+```
+
+**第一条是实打实的疏漏**：项目本来就有 `tools/run_tsan.sh`，
+我改了带并发的代码却没跑它。
+
+**为什么这条重要**：`test_probe` 里 4 线程 × 500 条能过，
+只能证明"计数没错"，**证明不了没有 data race** —— 竞争窗口小的时候，
+普通测试跑一万次也可能一次都不撞上。并发正确性是唯一必须靠工具证明的东西。
+
+### 二、TSan 结果（真跑过，不是假阴性）
+
+```
+tools/run_tsan.sh 已加入：test_probe / test_probe_instance
+build-tsan/tests/test_probe          → 18 passed, 0 failed, 0 处 data race
+build-tsan/tests/test_probe_instance →  6 passed, 0 failed, 0 处 data race
+两个二进制都确认链接了 __tsan_init
+```
+
+### 三、★ 中途差点得到一个假结论
+
+第一次跑 `run_tsan.sh`，输出是"退出码 0、0 处告警"，但我的摘要检查
+（grep `registered cases` / `PASS` / `result:`）**全部为空**。
+
+如果就此写"TSan 零竞争"，那就是**假阴性** —— 0 告警可能来自"根本没跑"。
+
+原因：`run_tsan.sh` 把测试的详细输出**重定向到别处**，只打印摘要。
+所以脚本日志里本来就没有 `PASS` 这些字样。
+
+**正确做法**：直接跑带 TSan 的二进制
+（`setarch -R ./build-tsan/tests/test_probe`），拿到 `registered cases` /
+`PASS` / `result:` 这些**只有真跑过才会有的证据**，再确认二进制链接了
+`__tsan_init`。
+
+**这是「校验本身会错」的第 8 次**，但这次方向相反：
+不是误报失败，而是**差点误报成功**。后者更危险 ——
+误报失败会让人再查一遍，误报成功会让人带着错误结论收工。
+
+### 四、剩余未做（诚实）
+
+| 空白 | 状态 | 为什么没做 |
+|---|---|---|
+| **soak 测试**（长时间稳定性） | 待做 | 最长只跑 14 秒；应跑 10 分钟以上看计数漂移与内存增长 |
+| **真实业务接入** | **做不到** | 需要用户的实际业务程序；所有实测都是模拟程序 |
+

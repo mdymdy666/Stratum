@@ -31,7 +31,8 @@ PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJ" || exit 1
 
 BUILD_DIR="build-tsan"
-DEFAULT_TARGETS=(test_concurrent_register test_pruned_ranges test_topic_type_definition)
+# 2026-10-17 补：probe 有原子操作 + 多线程写路径，之前**从未**被 TSan 覆盖。
+DEFAULT_TARGETS=(test_concurrent_register test_pruned_ranges test_topic_type_definition test_probe test_probe_instance)
 
 if [ "$#" -gt 0 ]; then
   TARGETS=("$@")
