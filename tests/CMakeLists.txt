@@ -183,3 +183,8 @@ stratum_add_test(test_probe_hot_reload unit/test_probe_hot_reload.cc unit probe)
 stratum_add_test(test_probe_status_edge integration/test_probe_status_edge.cc integration cli)
 target_compile_definitions(test_probe_status_edge PRIVATE
     PROBE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+
+# soak：持续写入 20 秒（计数精确/内存不涨）+ 绕 10 圈覆盖后计数仍精确
+stratum_add_test(test_probe_soak unit/test_probe_soak.cc unit probe)
+# 这条本身要跑 20 秒以上，给足超时；与其它测试并行会拉长时序，独占跑
+set_tests_properties(test_probe_soak PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)

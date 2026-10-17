@@ -57,6 +57,12 @@ static _Atomic int g_init_attempted = 0;
 static _Atomic int g_open_failed = 0;
 
 static stratum_probe_stats g_stats;
+/* 【并发说明】written 与 dropped_full 不由热路径自增 —— 它们是
+ * 从 ring 的 write_seq / committed_seq 推导出来的（见 get_stats）。
+ * 只有下面两个走"提前返回"分支的计数需要原子加。 */
+static _Atomic uint64_t g_dropped_off = 0;
+static _Atomic uint64_t g_dropped_bad = 0;
+static _Atomic uint64_t g_dropped_sampled = 0;
 
 /* ------------------------------------------------------------------------- */
 /* 工具                                                                       */
@@ -202,6 +208,9 @@ void stratum_probe_close(void) {
   g_init_attempted = 0;
   g_open_failed = 0;
   memset(&g_stats, 0, sizeof(g_stats));
+  __atomic_store_n(&g_dropped_off, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&g_dropped_bad, 0, __ATOMIC_RELAXED);
+  __atomic_store_n(&g_dropped_sampled, 0, __ATOMIC_RELAXED);
 }
 
 /* 懒初始化：只在第一次写入时做一次（唯一会 syscall 的地方） */
@@ -240,24 +249,24 @@ void stratum_probe_set_enabled(int enabled) {
 void stratum_probe_write(const char* topic, const void* payload,
                          size_t payload_len) {
   if (topic == NULL || topic[0] == '\0') {
-    ++g_stats.dropped_bad;
+    __atomic_fetch_add(&g_dropped_bad, 1, __ATOMIC_RELAXED);
     return;
   }
   if (g_hdr == NULL) {
     ensure_open();
     if (g_hdr == NULL) {
-      ++g_stats.dropped_bad;
+      __atomic_fetch_add(&g_dropped_bad, 1, __ATOMIC_RELAXED);
       return;
     }
   }
   if (!__atomic_load_n(&g_hdr->enabled, __ATOMIC_ACQUIRE)) {
-    ++g_stats.dropped_off;
+    __atomic_fetch_add(&g_dropped_off, 1, __ATOMIC_RELAXED);
     return;
   }
 
   const uint32_t cap = g_hdr->capacity;
   if (cap == 0) {
-    ++g_stats.dropped_bad;
+    __atomic_fetch_add(&g_dropped_bad, 1, __ATOMIC_RELAXED);
     return;
   }
 
@@ -311,11 +320,16 @@ void stratum_probe_write(const char* topic, const void* payload,
     }
   }
 
-  ++g_stats.written;
-
-  /* 环满的统计：写满一轮之后，每次写入都意味着一条旧记录被覆盖。
-   * 【诚实】判据是"序号 >= 容量"，因此第 cap+1 条开始计。 */
-  if (seq >= (uint64_t)cap) ++g_stats.dropped_full;
+  /* 【不再自增 written / dropped_full】
+   *
+   * 原因：soak 测试（2 线程 × 20 秒 = 2.5 亿次写入）抓到计数丢了 18 万条 ——
+   * `++g_stats.written` 是多线程下的读-改-写竞争。
+   *
+   * 修法不是"加锁/改原子"，而是**根本不在热路径数这个数**：
+   * written      = committed_seq（ring 的原子计数器，天然精确）
+   * dropped_full = write_seq - capacity（覆盖过的条数，同样精确）
+   *
+   * 好处：既修了竞争，又省掉两次自增 —— 热路径反而更快。 */
 }
 
 void stratum_probe_write_scope(const char* topic, uint64_t dur_ns) {
@@ -331,7 +345,22 @@ void stratum_probe_write_scope(const char* topic, uint64_t dur_ns) {
 void stratum_probe_get_stats(stratum_probe_stats* out) {
   if (out == NULL) return;
   *out = g_stats;
-  if (g_hdr != NULL) out->capacity = g_hdr->capacity;
+
+  /* 三个"提前返回"分支的计数来自原子变量 */
+  out->dropped_off = __atomic_load_n(&g_dropped_off, __ATOMIC_RELAXED);
+  out->dropped_bad = __atomic_load_n(&g_dropped_bad, __ATOMIC_RELAXED);
+  out->dropped_sampled = __atomic_load_n(&g_dropped_sampled, __ATOMIC_RELAXED);
+
+  if (g_hdr != NULL) {
+    out->capacity = g_hdr->capacity;
+    /* written / dropped_full 从 ring 的序号推导 —— 精确且零热路径开销。
+     * 注意用 committed（已写完）而不是 allocated：allocated 可能包含
+     * 一条正在写的记录，那样 written 会短暂大于实际完成数。 */
+    const uint64_t committed = __atomic_load_n(&g_hdr->committed_seq, __ATOMIC_ACQUIRE);
+    const uint64_t cap = g_hdr->capacity;
+    out->written = committed;
+    out->dropped_full = (committed > cap) ? (committed - cap) : 0;
+  }
 }
 
 /* ------------------------------------------------------------------------- */
