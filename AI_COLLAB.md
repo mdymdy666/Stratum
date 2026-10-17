@@ -9523,3 +9523,95 @@ STRATUM_CHECK_EQ(PickProm(...), 0LL);
 全量 ctest: 63 / 63
 ```
 
+
+---
+
+## 2026-10-17（续 133）| io 诊断包（`--include-context`，ctest 63 → 64）
+
+### 一、要解决什么
+
+现在 bundle = 会话目录 + MANIFEST。分析机拿到后能看数据，
+但**看不到"这份数据是在什么环境里采的"**：
+
+* 里面有探针数据吗？还是纯业务数据？
+* 数据率多少？（判断"长时间低速率"还是"短时间爆发"）
+* 主机、采集时刻
+* 完整性有没有已知问题
+
+这些信息复盘时经常被问，但人拿到 bundle 时**现场已经没了**。
+
+### 二、★ 核心约束：CONTEXT 是**可选附加物**
+
+```
+· 缺少它的 bundle 仍然有效（老 bundle 照用）
+· verify 不因它改变结论
+· 写不出来不影响 export 成功（主次不能颠倒）
+```
+
+这与 `pruned/` 的处理同一思路：附加信息不能影响主判定。
+
+**也正是这条约束，使得改动极小、且不破坏现有 17 个 io 测试**：
+`import` 是复制整个目录 → CONTEXT.json 自动跟随；
+`verify` 检查的是文件清单 → CONTEXT 是真实文件，清单一致。
+所以只需在 export 成功后多写一个文件，其他代码一行没改。
+
+### 三、CONTEXT.json 的内容
+
+```json
+{
+  "kind": "stratum-context",
+  "note": "可选诊断上下文。不是数据的一部分，缺失不影响 bundle 有效性；verify 不依据它判断完整性。",
+  "probe_prefix": "_probe.",
+  "layers": {
+    "business": {"events": 40, "topics": 2, "bytes": ...},
+    "probe":    {"events": 15, "topics": 1, "bytes": ...}
+  },
+  "timeline": {"first_ns": ..., "span_ns": ..., "avg_events_per_sec": 50.5},
+  "integrity": {"dropped": 0, "gaps": 0, "missing": 0, "has_issue": false},
+  "probe_topics": [{"topic": "_probe.p0", "events": 15}],
+  "host": {"hostname": "..."}
+}
+```
+
+**`avg_events_per_sec` 是刻意加的**：它让人一眼看出"这个会话是 3 秒爆发 1000 条，
+还是 3 小时匀速 1000 条" —— 这两种情况在数据量上完全一样，但含义完全不同。
+
+### 四、验证（6 用例全绿）
+
+| 用例 | 验证 |
+|---|---|
+| AbsentByDefault | 不带选项时**完全没有** CONTEXT.json（老行为不变） |
+| GeneratedWithCorrectLayers | 分层数字正确（业务 40/2、探针 15/1） |
+| BundleWithContextStillVerifies | 带 CONTEXT 的 bundle 仍报"完整"、退出码 0 |
+| BundleWithContextStillImports | 导入后条数正确 |
+| OldBundleWithoutContextStillWorks | 无 CONTEXT 的老 bundle 照常 verify/import |
+| CustomPrefixChangesLayers | `--probe-prefix` 影响 CONTEXT 的分层 |
+
+实测：
+```
+默认        → 无 CONTEXT.json ✅
+带选项      → 生成，verify 仍「完整（语义对账通过）」✅
+import 后   → CONTEXT.json 也跟随 ✅
+老 bundle   → verify 退出码 0 ✅
+```
+
+### 五、★ 又一次 `--format table`（第 5 次）
+
+`BundleWithContextStillVerifies` 断言输出里有"完整" → 失败。
+原因：`io verify` 默认输出 JSON（全局 `--format` 默认是 json），JSON 里没有这个词。
+
+**这个坑已经踩了 5 次。** 我在 prompt 里写了、在 `docs/14` 里也写了，
+但每次新写测试时还是忘。
+
+**这说明"写进纪律"确实不够 —— 必须从工具层面消除。**
+具体做法（留给后续）：测试里提供两个入口
+`RunCliTable()` / `RunCliJson()`，让"忘记传格式"在命名上就不自然。
+
+### 六、状态
+
+```
+全量 ctest: 64 / 64
+CLI 命令: 15 组
+io export 新增: --include-context / --probe-prefix
+```
+

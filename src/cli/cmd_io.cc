@@ -30,7 +30,9 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include "stratum/core/recorder.h"
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 #include "cli_common.h"
@@ -178,6 +180,113 @@ struct CheckResult {
 bool IsVolatileLsmFile(const std::string& rel) {
   return rel == "LOCK" || rel == "LOG" || rel == "LOG.old" ||
          rel == "CURRENT" || rel.rfind("MANIFEST-", 0) == 0;
+}
+
+// ---------------------------------------------------------------------------
+// 诊断上下文（`--include-context` 时生成）
+//
+// 【为什么单独一个文件而不是塞进 MANIFEST】
+// MANIFEST 是**校验契约**的一部分（kind / 文件清单 / 话题摘要）。
+// 若把诊断信息塞进去，将来 CONTEXT 的字段变化就可能影响校验逻辑。
+// 分开之后：MANIFEST 只管"数据完整性"，CONTEXT 只管"环境说明"。
+//
+// 【★ 核心约束】CONTEXT 是可选附加物：
+//   · 缺少它 bundle 仍然有效
+//   · verify 不因它改变结论
+// 因此本函数失败**不应导致 export 失败** —— 见调用处的处理。
+// ---------------------------------------------------------------------------
+constexpr const char* kContextName = "CONTEXT.json";
+
+bool WriteContext(const SessionMetadata& meta,
+                  const std::vector<TopicSummary>& topics,
+                  const std::string& bundle_root,
+                  const std::string& probe_prefix,
+                  std::string* error) {
+  // 业务层分类（与 verify / diff / metrics 同一套前缀约定）
+  uint64_t biz_events = 0, probe_events = 0, biz_bytes = 0, probe_bytes = 0;
+  size_t biz_topics = 0, probe_topics = 0;
+  TimestampNs first_ns = kInvalidTimestamp, last_ns = 0;
+  std::vector<const TopicSummary*> probes;
+
+  for (const auto& t : topics) {
+    const bool is_probe = !probe_prefix.empty() &&
+                          t.topic_name.rfind(probe_prefix, 0) == 0;
+    if (is_probe) {
+      ++probe_topics;
+      probe_events += t.message_count;
+      probe_bytes += t.byte_count;
+      probes.push_back(&t);
+    } else {
+      ++biz_topics;
+      biz_events += t.message_count;
+      biz_bytes += t.byte_count;
+    }
+    if (t.first_ns != kInvalidTimestamp &&
+        (first_ns == kInvalidTimestamp || t.first_ns < first_ns)) {
+      first_ns = t.first_ns;
+    }
+    if (t.last_ns > last_ns) last_ns = t.last_ns;
+  }
+  const uint64_t span_ns =
+      (first_ns != kInvalidTimestamp && last_ns >= first_ns) ? (last_ns - first_ns) : 0;
+
+  std::ostringstream o;
+  o << "{\n";
+  o << "  \"schema_version\": 1,\n";
+  o << "  \"kind\": \"stratum-context\",\n";
+  o << "  \"note\": \"可选诊断上下文。不是数据的一部分，缺失不影响 bundle 有效性；"
+       "verify 不依据它判断完整性。\",\n";
+  o << "  \"probe_prefix\": \"" << probe_prefix << "\",\n";
+
+  o << "  \"layers\": {\n";
+  o << "    \"business\": {\"events\": " << biz_events << ", \"topics\": "
+    << biz_topics << ", \"bytes\": " << biz_bytes << "},\n";
+  o << "    \"probe\": {\"events\": " << probe_events << ", \"topics\": "
+    << probe_topics << ", \"bytes\": " << probe_bytes << "}\n";
+  o << "  },\n";
+
+  o << "  \"timeline\": {\"first_ns\": " << first_ns << ", \"last_ns\": " << last_ns
+    << ", \"span_ns\": " << span_ns;
+  if (span_ns > 0) {
+    // 平均速率：判断"长时间低速率"还是"短时间爆发"的关键指标
+    const double per_sec =
+        static_cast<double>(biz_events + probe_events) * 1e9 / static_cast<double>(span_ns);
+    o << ", \"avg_events_per_sec\": " << per_sec;
+  }
+  o << "},\n";
+
+  o << "  \"integrity\": {\"dropped\": " << meta.quality.dropped_messages
+    << ", \"gaps\": " << meta.quality.sequence_gaps
+    << ", \"missing\": " << meta.quality.missing_messages
+    << ", \"has_issue\": " << (meta.quality.HasIntegrityIssue() ? "true" : "false")
+    << "},\n";
+
+  o << "  \"probe_topics\": [";
+  for (size_t i = 0; i < probes.size(); ++i) {
+    if (i) o << ", ";
+    o << "{\"topic\": \"" << probes[i]->topic_name << "\", \"events\": "
+      << probes[i]->message_count << "}";
+  }
+  o << "],\n";
+
+  std::string hostname = "unknown";
+  char hb[256] = {0};
+  if (::gethostname(hb, sizeof(hb) - 1) == 0) hostname = hb;
+  o << "  \"host\": {\"hostname\": \"" << hostname << "\"}\n";
+  o << "}\n";
+
+  const std::string path = bundle_root + "/" + kContextName;
+  std::ofstream f(path, std::ios::out | std::ios::trunc);
+  if (!f) {
+    if (error) *error = "无法写入 " + path;
+    return false;
+  }
+  f << o.str();
+  if (!f) {
+    if (error) *error = "写入 " + path + " 时失败";
+    return false;
+  }
+  return true;
 }
 
 // 从 MANIFEST 里抽取一个字段的粗糙解析（仅用于校验，不求完备）
@@ -329,6 +438,9 @@ int CmdIo(const std::vector<std::string>& args, GlobalOptions g) {
   std::string to;
   bool dry_run = false;
   bool overwrite = false;
+  // 诊断上下文（可选）：把"这份数据在什么环境里采的"一起打包
+  bool include_context = false;
+  std::string probe_prefix = "_probe.";
 
   for (size_t i = 1; i < args.size(); ++i) {
     const std::string& a = args[i];
@@ -344,6 +456,15 @@ int CmdIo(const std::vector<std::string>& args, GlobalOptions g) {
     }
     if (a == "--dry-run") { dry_run = true; continue; }
     if (a == "--overwrite") { overwrite = true; continue; }
+    if (a == "--include-context") { include_context = true; continue; }
+    if (a == "--probe-prefix") {
+      if (i + 1 >= args.size()) {
+        return Fail(kUsage, "--probe-prefix 缺少参数值", "",
+                    "默认 _probe.（与 verify / diff / metrics 一致）");
+      }
+      probe_prefix = args[++i];
+      continue;
+    }
     if (!a.empty() && a[0] == '-') {
       return Fail(kUsage, "io " + sub + " 不支持该选项: " + a,
                   "支持 --to / --dry-run / --overwrite", "");
@@ -421,6 +542,40 @@ int CmdIo(const std::vector<std::string>& args, GlobalOptions g) {
     std::string err;
     if (!WriteManifest(to, to, src, &err)) {
       return Fail(kError, "写入清单失败", err, "目标目录可能不可写");
+    }
+
+    // -------------------------------------------------------------------------
+    // 可选：诊断上下文
+    //
+    // 【失败不致命】CONTEXT 是"说明"而不是"数据"。
+    // 写不出来只警告 —— 否则用户会因为"诊断信息写不下"而拿不到数据，主次颠倒。
+    // -------------------------------------------------------------------------
+    if (include_context) {
+      // 这里没有现成的 timeline（export 只做文件复制），临时打开一次取摘要。
+      // 打开失败也不影响导出 —— CONTEXT 本来就是可选的。
+      SessionMetadata cmeta;
+      std::vector<TopicSummary> ctopics;
+      {
+        TimelineImplV2 ctimeline;
+        if (ctimeline.Open(src).ok()) {
+          Query cq(&ctimeline);
+          (void)cq.GetInfo(&cmeta);
+          (void)cq.ListTopics(&ctopics);
+          (void)ctimeline.Close();
+        }
+      }
+
+      std::string cerr;
+      if (WriteContext(cmeta, ctopics, to, probe_prefix, &cerr)) {
+        if (!g.quiet) {
+          std::fprintf(stderr, "  上下文: %s/%s（可选诊断信息）\n", to.c_str(),
+                       kContextName);
+        }
+      } else {
+        std::fprintf(stderr,
+                     "  警告: 诊断上下文写入失败（%s）—— 数据导出本身是成功的，"
+                     "这只是少了一份可选说明\n", cerr.c_str());
+      }
     }
 
     if (g.format == Format::kJson) {

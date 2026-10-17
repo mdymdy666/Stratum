@@ -232,3 +232,9 @@ stratum_add_test(test_metrics_business integration/test_metrics_business.cc inte
 target_compile_definitions(test_metrics_business PRIVATE
     MB_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
 set_tests_properties(test_metrics_business PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
+
+# io 诊断上下文：默认可选、带 context 仍能 verify/import、老 bundle 兼容、前缀可配
+stratum_add_test(test_io_context integration/test_io_context.cc integration cli)
+target_compile_definitions(test_io_context PRIVATE
+    IOC_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_io_context PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
