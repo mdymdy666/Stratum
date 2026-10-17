@@ -32,6 +32,7 @@
 | [`11-type-system.md`](11-type-system.md) | **类型系统的决策与已知边界**：定义格式选型（简化自描述）、两处已知有损、元数据独立 key 约定、端到端链路现状 |
 | [`12-roadmap.md`](12-roadmap.md) | **进度快照与下一步任务**：当前状态、已完成清单、用户期望（eBPF/topic 动态检测）及评估、三层下一步任务、遗留问题、方法学纪律 |
 | [`13-probe-requirements.md`](13-probe-requirements.md) | **埋点工程需求分析**：12 个真实场景（含监控回调/格式动态指定/QoS 动态调配/topic 动态配置）、16 条需求（PR-01~16）、边界与非目标 |
+| [`14-verify-business-layer.md`](14-verify-business-layer.md) | **verify 的业务层视角**：为什么 verify 不对业务逻辑下结论、两层设计（分层/启发式）、RC-B1 交叉发现、三个实现坑 |
 | [`handoff-readme.md`](handoff-readme.md) | 历史：本项目早期的"文档集索引"（已由根 README 取代） |
 
 ---

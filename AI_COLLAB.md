@@ -9085,3 +9085,89 @@ dropped_bad  ← _Atomic（同上）
 
 **一个会说谎的计数器，比一个明显坏掉的功能更难发现。**
 
+
+---
+
+## 2026-10-17（续 128）| verify 业务层视角 + 交叉场景第一块
+
+### 一、要解决的问题
+
+**verify 会说谎**：它只看 DDS 层。业务收到 1000 条但内部失败 50 条时，
+verify 报 `has_integrity_issue=false` —— 用户以为数据可用，拿去复盘才发现业务对不上。
+
+### 二、★ 核心约束：新增信息，但不下结论
+
+**verify 的职责是「数据完整性」，不是「业务正确性」。**
+
+那 50 条失败可能完全是正常的（50 个订单被取消、50 个告警被确认）。
+若 verify 因此设 `has_integrity_issue=true`，它就从"不知道"变成了"瞎猜"，
+而**猜错的代价比不猜更高** —— 用户会去查一个并不存在的问题。
+
+所以设计的重点不是"多给几个数字"，而是**分层呈现、明确说明不下结论**。
+
+### 三、两层设计
+
+| 层 | 成本 | 内容 |
+|---|---|---|
+| **第一层**（默认） | 零（不读 payload） | `dds_events` / `probe_events` / 各自 topic 数 / 每个探针的条数 |
+| **第二层**（`--business-signals`） | 扫全量 payload | 启发式提取 `result=` / `status=` 的 ok / error / unknown 分布 |
+
+第二层默认关闭是因为一个跑数天的会话可能有上千万条探针记录。
+
+**为什么用启发式而不是要求注册格式**：探针负载由业务决定（docs/13 非目标），
+若要求"必须含 result 字段"就把可选分析变成了对业务的格式约束。
+
+### 四、★ 交叉视角立刻发现的新问题（RC-B1）
+
+功能上线后第一次跑就看到：
+
+```
+dds_events: 0                ← 一条业务数据都没有
+probe_events: 20
+has_integrity_issue: false   ← verify 说"完整"
+```
+
+从完整性看没错；从"这会话能用来复盘业务吗"看，**严重误导**。
+
+新增 finding `RC-B1`（计入 findings、**不计入** has_integrity_issue）：
+"只有探针数据，没有业务数据 —— 这个会话只能用于诊断，不能用于业务数据复盘"。
+
+**单看任何一层都发现不了 —— 只有并置后才知道"两层严重失衡"。**
+
+### 五、三个实现坑
+
+**① `kInvalidTimestamp = 0` 不是"最早"**
+`whole.begin_ns = 0` 被当成无效时间戳 → 段错误（exit 139）。
+正确做法：用 topic 自己的 `first_ns` / `last_ns`。
+
+**② 批量替换只改了一半**
+把循环上界改成 `findings_with_business.size()`，但循环体里的 `findings[i]` 没改 ——
+有 RC-B1 时越界崩溃。编译器不报（类型都对），靠 gdb 定位到具体行。
+
+**③ `STRATUM_PROBE` 的 sizeof 对指针失效**（我自己踩）
+`STRATUM_PROBE_KV("t", (i<16) ? "ok" : "err")` —— 三元表达式是 `const char*`，
+`sizeof` 得 8，只发出 7 字节。而**头文件里早就写了这条警告**，我还是踩了。
+
+修法不是再写一遍注释，而是加 `STRATUM_PROBE_STR`（用 strlen）作为显式正确入口。
+
+**这是"写在注释里防不住错误"的第三次** —— 应该让错误不可能发生，或给出显式的正确入口。
+
+### 六、测试（5 用例）
+
+| 用例 | 验证 |
+|---|---|
+| LayersAreSeparated | dds/probe 事件数分开呈现 |
+| SignalsExtractedHeuristically | 默认 `signals:null`；加选项后 ok/error 有值且 sum==scanned |
+| **BusinessFailureDoesNotAffectIntegrity** | **20 条全 error，但 has_integrity_issue=false、退出码 0** |
+| OnlyProbeDataWarnsButStaysClean | RC-B1 存在，但完整性仍 clean |
+| CustomPrefixIsHonored | 换前缀后分类随之改变 |
+
+### 七、下一步建议（已写入 docs/14 第七节）
+
+按性价比：**diff > 回放+埋点+diff（回归测试）> io 诊断包 > metrics 探针指标**。
+
+**为什么 diff 排第一**：所有交叉本质都是"把两份东西放在一起看"。
+没有"比较"，交叉只能叫"拼接"。
+
+diff 有三个必须先裁决的技术问题：时间轴对齐 / 条数不同 / 语义差异。
+

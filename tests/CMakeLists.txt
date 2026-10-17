@@ -188,3 +188,10 @@ target_compile_definitions(test_probe_status_edge PRIVATE
 stratum_add_test(test_probe_soak unit/test_probe_soak.cc unit probe)
 # 这条本身要跑 20 秒以上，给足超时；与其它测试并行会拉长时序，独占跑
 set_tests_properties(test_probe_soak PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+
+# verify 的业务层视角：分层 / 启发式信号 / ★不污染完整性判定 / RC-B1 / 前缀可配
+stratum_add_test(test_verify_business integration/test_verify_business.cc integration cli)
+target_compile_definitions(test_verify_business PRIVATE
+    PROBE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum"
+    PROBE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+set_tests_properties(test_verify_business PROPERTIES TIMEOUT 400 RUN_SERIAL TRUE)

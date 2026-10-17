@@ -67,6 +67,7 @@
 #define STRATUM_PROBE_PROBE_H_
 
 #include <stddef.h>
+#include <string.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -82,6 +83,7 @@ extern "C" {
 /* 全部变成空语句。**连 enabled() 都不调用** —— 这样 -O2 下整段被彻底消除。 */
 #define STRATUM_PROBE(topic, payload) ((void)0)
 #define STRATUM_PROBE_KV(topic, kv_text) ((void)0)
+#define STRATUM_PROBE_STR(topic, cstr) ((void)0)
 #define STRATUM_PROBE_BEGIN(topic) ((void)0)
 #define STRATUM_PROBE_END(handle) ((void)0)
 #define STRATUM_PROBE_SCOPE(topic) ((void)0)
@@ -242,6 +244,37 @@ uint64_t stratum_probe_now_mono_ns(void);
 
 /* 2) KV 负载：接受**已组织好的字符串**（见文件头"务实决定"） */
 #define STRATUM_PROBE_KV(topic, kv_text) STRATUM_PROBE((topic), (kv_text))
+
+/* 1b) **运行时字符串指针**专用版本 —— 用 strlen，不依赖 sizeof。
+ *
+ * 【什么时候必须用它】负载不是字符串字面量，而是：
+ *     · 变量        const char* msg = ...;
+ *     · 三元表达式  cond ? "a" : "b"        ← 类型是 const char*，不是数组
+ *     · 函数返回值  GetMessage()
+ *
+ * 【为什么需要单独一个宏】
+ * `STRATUM_PROBE` 用 `sizeof(payload) - 1`，只对**数组**成立。
+ * 传指针时 sizeof 得到 8（指针大小），于是只发出前 7 个字节 ——
+ * **不报错、不崩溃，只是数据被悄悄截断**。
+ *
+ * 这个坑我自己踩过一次：测试代码写了
+ *     STRATUM_PROBE_KV("t", (i < 16) ? "ok" : "err")
+ * 结果只发出 7 字节，而头文件里其实已经写了警告。
+ * **"在注释里提醒"防不住错误，所以要给一个显式的正确入口。**
+ *
+ * 代价：多一次 strlen 遍历（对 100 字节以内的负载可忽略）。
+ * 能用字面量时优先用 STRATUM_PROBE —— 那是零开销的。 */
+#define STRATUM_PROBE_STR(topic, cstr)                                   \
+  do {                                                                   \
+    if (stratum_probe_enabled()) {                                        \
+      const char* _sp = (cstr);                                           \
+      if (_sp != 0) {                                                     \
+        size_t _n = strlen(_sp);                                          \
+        if (_n > STRATUM_PROBE_PAYLOAD_MAX) _n = STRATUM_PROBE_PAYLOAD_MAX; \
+        stratum_probe_write((topic), _sp, _n);                            \
+      }                                                                   \
+    }                                                                     \
+  } while (0)
 
 /* 3) 作用域计时（C 用 BEGIN/END） */
 #define STRATUM_PROBE_BEGIN(topic)                                      \
