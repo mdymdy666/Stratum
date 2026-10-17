@@ -116,6 +116,51 @@ typedef struct stratum_probe_record {
 } stratum_probe_record;
 
 /* ------------------------------------------------------------------------- */
+/* ring 头部（写侧与读侧共享同一布局）                                        */
+/* ------------------------------------------------------------------------- */
+
+#define STRATUM_RING_MAGIC 0x53545250u /* 'STRP' */
+#define STRATUM_RING_VERSION 1u
+
+/* 【为什么放在头文件里】读取器（stratum probe）在**另一个进程**里按同一
+ * 布局解析这块共享内存。若两边各写一份结构，"字段顺序一改就静默错位" ——
+ * 不报错，只读到垃圾。共享类型定义由编译器保证两侧一致。
+ *
+ * 布局说明（读取器的消费规则）：
+ *   · write_seq      ：已分配的序号（写者 fetch_add；**可能包含未写完的**）
+ *   · committed_seq  ：已写完的序号（到这里的记录一定完整）
+ *   · 读取器必须用 committed_seq 做上界，且只消费 < 本进程上次读到的位置
+ *     的新记录 —— 否则环形覆盖会重复读。 */
+typedef struct stratum_ring_header {
+  uint32_t magic;        /* STRATUM_RING_MAGIC */
+  uint32_t version;      /* STRATUM_RING_VERSION */
+  uint32_t capacity;     /* 记录条数（2 的幂） */
+  uint32_t record_size;  /* = sizeof(stratum_probe_record) */
+
+  uint64_t write_seq;     /* 原子：已分配序号 */
+  uint64_t committed_seq; /* 原子：已提交序号 */
+  uint32_t enabled;       /* 原子：全局开关（读取器可写，写侧只读） */
+  uint32_t reserved[7];
+
+  /* records[] 紧跟在这个头部之后 */
+} stratum_ring_header;
+
+/* 给定 ring 起始地址，返回记录数组的起始地址 */
+static inline stratum_probe_record* stratum_ring_records(stratum_ring_header* h) {
+  return (stratum_probe_record*)((char*)h + sizeof(stratum_ring_header));
+}
+static inline const stratum_probe_record* stratum_ring_records_const(
+    const stratum_ring_header* h) {
+  return (const stratum_probe_record*)((const char*)h + sizeof(stratum_ring_header));
+}
+
+/* 计算一个 ring 需要多少字节（供读取器校验文件大小） */
+static inline size_t stratum_ring_bytes(uint32_t capacity) {
+  return sizeof(stratum_ring_header) +
+         (size_t)capacity * sizeof(stratum_probe_record);
+}
+
+/* ------------------------------------------------------------------------- */
 /* 生命周期                                                                   */
 /* ------------------------------------------------------------------------- */
 

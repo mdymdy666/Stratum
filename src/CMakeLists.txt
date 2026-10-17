@@ -150,6 +150,7 @@ add_executable(stratum
     cli/cmd_io.cc
     cli/cmd_doctor.cc
     cli/cmd_metrics.cc
+    cli/cmd_probe.cc
     cli/cmd_record.cc
     cli/cmd_query.cc
     cli/cmd_verify.cc

@@ -39,31 +39,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* ------------------------------------------------------------------------- */
-/* ring 头部（放在共享内存起始处）                                            */
-/* ------------------------------------------------------------------------- */
-
-#define STRATUM_RING_MAGIC 0x53545250u /* 'STRP' */
-#define STRATUM_RING_VERSION 1u
-
-typedef struct stratum_ring_header {
-  uint32_t magic;
-  uint32_t version;
-  uint32_t capacity;     /* 记录条数 */
-  uint32_t record_size;  /* = sizeof(stratum_probe_record) */
-
-  /* 已分配序号（写者递增）。注意：它可能大于已写完的序号。 */
-  _Atomic uint64_t write_seq;
-  /* 已提交序号（即"到这里的数据都是完整的"）。读者用它做上界。 */
-  _Atomic uint64_t committed_seq;
-
-  /* 全局开关。读取器/测试可写；写者只读。
-   * 【为什么要放在共享内存里】这样"关闭探针"不需要业务重启，
-   * 由 Stratum 侧或配置热重载直接改这一位即可（PR-06 的开关）。 */
-  _Atomic uint32_t enabled;
-
-  uint32_t reserved[6];
-} stratum_ring_header;
+/* ring 头部结构已在 probe.h 中定义（写侧与读侧共享同一布局）。 */
 
 /* ------------------------------------------------------------------------- */
 /* 进程内状态（静态；热路径只读这些指针）                                     */

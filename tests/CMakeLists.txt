@@ -155,3 +155,9 @@ stratum_add_test(test_probe_config unit/test_probe_config.cc unit probe)
 stratum_add_test(test_probe unit/test_probe.cc unit probe)
 target_compile_definitions(test_probe PRIVATE
     PROJECT_INCLUDE_DIR="${CMAKE_SOURCE_DIR}/src/include")
+
+# 埋点端到端：业务(只含 probe.h) → ring → stratum probe → DDS → record → query
+stratum_add_test(test_cli_probe integration/test_cli_probe.cc integration probe cli)
+target_compile_definitions(test_cli_probe PRIVATE
+    PROBE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum"
+    PROBE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
