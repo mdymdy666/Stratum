@@ -9615,3 +9615,74 @@ CLI 命令: 15 组
 io export 新增: --include-context / --probe-prefix
 ```
 
+
+---
+
+## 2026-10-17（续 134）| 从工具层面消灭「--format table」的坑（ctest 64 → 65）
+
+### 一、为什么这次不是"再写一遍纪律"
+
+`--format table` 这个坑我踩了 **5 次**：
+
+```
+测试里断言人类可读文本（"完整" / "会话对比" / "事件"）
+但没传 --format table
+→ 全局 --format 默认是 json
+→ 输出是 JSON，里面没有那些词
+→ 断言失败，而我第一反应总是"功能坏了"
+```
+
+**写进纪律、写进 docs/14、写进每轮 prompt —— 全都试过，还是照踩。**
+
+结论：**"写在纪律里"防不住错误，必须让错误在命名上就不自然。**
+
+### 二、产出：`tests/cli_runner.h`
+
+```cpp
+RunCliTable(cmd)    // 强制 --format table
+RunCliJson(cmd)     // 强制 --format json
+RunSplitTable/SplitJson  // 分离 stdout/stderr 版本
+PickInSide(text, side, field)  // 限定作用域取字段（避免同名 key 歧义）
+```
+
+名字里带格式，**想在 Table 版本里断言 JSON 就先得停下来想一想**。
+
+**关键实现细节**：`--format` 是**全局选项**，必须插到子命令**之前**。
+`InsertFormat()` 负责这件事 —— 插错位置会让 `--format` 被当成子命令选项，
+命令直接报 USAGE，而错误消息看起来像"功能不支持"，非常误导。
+
+### 三、★ 先证明辅助本身是对的（7 个用例）
+
+**为什么"测试测试辅助"值得一个套件**：
+
+这个辅助的存在目的就是消灭一个坑。**如果辅助自己错了**（比如把 `--format`
+插到错误位置），那所有用它写的测试都会以**更隐蔽**的方式错 ——
+它们拿到 json 却以为是 table，断言失败，而我第一反应又是"功能坏了"。
+
+| 用例 | 验证 |
+|---|---|
+| InsertFormatPlacesOptionBeforeSubcommand | `stratum verify /x` → `stratum --format table verify /x` |
+| InsertFormatDoesNotDuplicate | 已含 `--format` 时原样返回 |
+| TableReallyReturnsHumanText | 拿到中文、且**不是** JSON（首字符不是 `{`） |
+| JsonReallyReturnsJson | 以 `{` 开头、含 `schema_version` |
+| **TableAndJsonDiffer** | **两者输出必须不同** —— 这是 `--format` 真的生效的最强判据 |
+| SplitSeparatesStreams | stdout 是完整 JSON、警告只在 stderr |
+| PickInSideScopesCorrectly | 顶层 `left.events=10000` 不被 `changed[].left_events` 干扰 |
+
+**`TableAndJsonDiffer` 是核心**：如果 `--format` 没生效，两个输出会完全一样。
+
+### 四、为什么不改老测试
+
+新增 `tests/cli_runner.h`，**不改动任何现有测试文件**。
+
+理由：老测试虽然用裸 `RunCli`，但它们**当前是通过的**（该传 table 的地方已经传了）。
+改动它们只有风险没有收益。新测试用新辅助即可。
+
+**若将来要统一，应逐个文件迁移并每个都跑一遍** —— 不该一次性批量替换。
+
+### 五、状态
+
+```
+全量 ctest: 65 / 65
+```
+

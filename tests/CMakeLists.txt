@@ -238,3 +238,11 @@ stratum_add_test(test_io_context integration/test_io_context.cc integration cli)
 target_compile_definitions(test_io_context PRIVATE
     IOC_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
 set_tests_properties(test_io_context PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
+
+# cli_runner.h 辅助本身：InsertFormat 位置 / table-json 真的不同 / stdout-stderr 分离
+stratum_add_test(test_cli_runner integration/test_cli_runner.cc integration cli)
+target_compile_definitions(test_cli_runner PRIVATE
+    CR_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+# 让 #include "cli_runner.h" 能找到 tests/ 下的头
+target_include_directories(test_cli_runner PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+set_tests_properties(test_cli_runner PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
