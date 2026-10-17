@@ -523,4 +523,70 @@ STRATUM_TEST(ProbeReal, TwoInstancesAreIsolated) {
   fs::remove(shm_b, ec);
 }
 
+// ===========================================================================
+// 九、双时间戳（PR-15）
+// ===========================================================================
+//
+// 记录里同时保存 realtime 与 mono：
+//   · realtime → 与业务 DDS 数据对齐（S10）
+//   · mono     → 算耗时，不受系统时间调整影响
+//
+// 【为什么必须断言】拿 mono 去对齐业务数据会导致"时间轴错位"，
+// 而且不会报错 —— 只是复盘时怎么都对不上。
+
+STRATUM_TEST(Probe, RecordsBothTimestamps) {
+  const std::string shm = FreshShm("ts");
+  ResetProbe(shm);
+  STRATUM_CHECK_EQ(stratum_probe_open(shm.c_str()), 0);
+
+  // 顺序写 5 条，中间稍微隔开
+  for (int i = 0; i < 5; ++i) {
+    stratum_probe_write("ts/x", "v", 1);
+    std::this_thread::sleep_for(std::chrono::microseconds(200));
+  }
+
+  const auto* hdr = static_cast<const stratum_ring_header*>(stratum_probe_ring_view());
+  STRATUM_CHECK_TRUE(hdr != nullptr);
+  const stratum_probe_record* recs = stratum_ring_records_const(hdr);
+
+  uint64_t prev_mono = 0;
+  for (uint32_t i = 0; i < 5; ++i) {
+    const stratum_probe_record& r = recs[i];
+    // 1) 两个时间戳都采集了
+    STRATUM_CHECK_TRUE(r.ts_realtime_ns > 0);
+    STRATUM_CHECK_TRUE(r.ts_mono_ns > 0);
+
+    // 2) mono 单调不减（顺序写入时的耗时计算前提）
+    if (i > 0) STRATUM_CHECK_TRUE(r.ts_mono_ns >= prev_mono);
+    prev_mono = r.ts_mono_ns;
+
+    // 3) 两者是"同一时刻的两个时钟读数"：realtime 远大于 mono，
+    //    但差值（开机时长）应在一个合理窗口内（这里只检查非负且不过分）
+    STRATUM_CHECK_TRUE(r.ts_realtime_ns > r.ts_mono_ns);
+  }
+
+  std::printf("      [双时间戳] 5 条记录都含 realtime 与 mono，mono 单调不减\n");
+  ResetProbe(shm);
+}
+
+STRATUM_TEST(Probe, TimestampsAdvanceBetweenWrites) {
+  // 两次写入之间 mono 必须前进 —— 否则耗时永远是 0，监控失去意义
+  const std::string shm = FreshShm("ts2");
+  ResetProbe(shm);
+  STRATUM_CHECK_EQ(stratum_probe_open(shm.c_str()), 0);
+
+  stratum_probe_write("ts/y", "a", 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  stratum_probe_write("ts/y", "b", 1);
+
+  const auto* hdr = static_cast<const stratum_ring_header*>(stratum_probe_ring_view());
+  const stratum_probe_record* recs = stratum_ring_records_const(hdr);
+  const uint64_t d = recs[1].ts_mono_ns - recs[0].ts_mono_ns;
+  // 至少 1ms（我们 sleep 了 2ms，给足余量）
+  STRATUM_CHECK_TRUE(d >= 1000 * 1000ULL);
+  std::printf("      [双时间戳] 两次写入的 mono 差 %llu ns（>= 1ms）\n",
+              static_cast<unsigned long long>(d));
+  ResetProbe(shm);
+}
+
 STRATUM_TEST_MAIN()
