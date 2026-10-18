@@ -28,6 +28,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -588,7 +590,21 @@ STRATUM_TEST(MergeFormat, TableMatchesJson) {
   // 两种输出描述的是同一件事：table 里的条数与 json 的 merged.events 一致
   STRATUM_CHECK_TRUE(HasSub(t.output, "写入 20 条"));
 
-  std::printf("      [双输出] table 含表格文本与说明；json 含 note；条数一致\n");
+  // --report：合并报告可另存（"产出合并后的会话 + 一份合并报告"）
+  const std::string report_path = TempDir("fmt_report") + "/merge.json";
+  const CliResult r = RunCliJson(kCli + " session merge " + src + " --to " +
+                                 TempDir("fmt_r") + "/merged --report " + report_path);
+  STRATUM_CHECK_EQ(r.code, 0);
+  std::ifstream rf(report_path);
+  STRATUM_CHECK_TRUE(rf.good());
+  const std::string report((std::istreambuf_iterator<char>(rf)),
+                           std::istreambuf_iterator<char>());
+  STRATUM_CHECK_EQ(PickInObject(report, "merged", "events"), 20LL);
+  STRATUM_CHECK_TRUE(HasSub(report, "\"dedupe\""));
+  // note 在文件里也必须存在（不只是 stdout）
+  STRATUM_CHECK_TRUE(HasSub(report, "合并不判断数据对错"));
+
+  std::printf("      [双输出] table 含表格文本与说明；json 含 note；--report 落盘；条数一致\n");
 }
 
 STRATUM_TEST_MAIN()
