@@ -10146,3 +10146,40 @@ $ wait
   不构成冲突。
 - `test_diff` 的 `/tmp/absent_<pid>_*` 本来就 pid 唯一。
 - `test_safe_remove` / `test_record_cli_errors` 是本轮新增，路径已带 pid。
+
+## 2026-10-18 17:2x — 真问题：LSM v1 WAL 的块尾 padding 会让后续记录全部不可读
+
+### 触发条件
+
+某条逻辑记录恰好结束在 32KB 块尾前 1~6 字节（剩余空间 < 7 字节 header）时，
+下一次 `Append` 进入 padding 分支。
+
+### 复现（直接调 WAL 类，修复前）
+
+```
+第一条记录写到 size_bytes()==32762
+再写一条普通记录 "after/pad"="ok"
+Replay → ok=0 code=2
+  Corruption: WAL unknown record type at offset 32762
+  count=1          # 后一条完全正常的记录被丢弃
+```
+
+### 根因
+
+writer 的 padding 分支调用 `EmitPhysicalRecord(kLogZeroType, leftover)`，
+实际写出"7 字节 header（length=leftover、type=0）+ leftover 字节 0"：
+
+- 文件布局被推出块边界 7 字节（`block_offset_` 却重置为 0，后续记账全错位）；
+- `Replay` 把 `type < kLogFullType` 判为 Corruption → 该块之后所有记录都读不出来。
+
+### 修法（对齐 LevelDB）
+
+- padding 改为**裸 0 字节**（不写 header），`size_bytes_` 相应累加；
+- `Replay` 在读每条记录前用 `pos % 32768` 判断块尾剩余，`< header` 时直接跳到
+  块边界。这样旧版本写出的"全 0 header + 0 payload"也能被正确跳过（向后兼容）。
+
+### 测试
+
+`tests/review/test_wal_corruption.cc::BlockTailPaddingDoesNotHideFollowingRecords`
+—— 修复前 count=1 且 Corruption，修复后 count=2 且第二条 key/value 正确。
+全量：ctest 69/69。

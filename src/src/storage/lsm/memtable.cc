@@ -445,14 +445,29 @@ Status WAL::Append(uint64_t sequence, ValueType type, const std::string& key,
     const int64_t leftover =
         static_cast<int64_t>(kLogBlockSize) - static_cast<int64_t>(block_offset_);
     if (leftover < kLogHeaderSize) {
-      // block 尾部放不下 header：用 0 填充到 block 边界
+      // block 尾部放不下 header：写 leftover 个 0 字节填充到 block 边界。
+      //
+      // 【关键】这里**不能**调用 EmitPhysicalRecord：那会写一个 7 字节 header
+      // （length=leftover、type=kLogZeroType），把文件布局推出块边界 7 字节，
+      // 且 Replay 会把 type<1 的记录判成 Corruption —— 该块之后的**所有**完好
+      // 记录都读不出来（实测：offset 32762 处 Corruption，后一条正常记录丢失）。
+      // 对齐 LevelDB 的做法：padding 是**裸 0 字节**，不是记录。
       if (leftover > 0) {
         const char zeros[kLogHeaderSize] = {0};
-        Status s = EmitPhysicalRecord(kLogZeroType, zeros,
-                                      static_cast<size_t>(leftover));
-        if (!s.ok()) {
-          return s;
+        size_t done = 0;
+        while (done < static_cast<size_t>(leftover)) {
+          const ssize_t w = ::write(fd_, zeros + done,
+                                    static_cast<size_t>(leftover) - done);
+          if (w <= 0) {
+            // 与 EmitPhysicalRecord 一致：失败即报错，由上层决定是否重试
+            if (::ftruncate(fd_, static_cast<off_t>(size_bytes_)) != 0) {
+              // 回滚失败：保持原错误返回，上层会重试/报错
+            }
+            return Status::IOError("WAL padding write failed");
+          }
+          done += static_cast<size_t>(w);
         }
+        size_bytes_ += static_cast<uint64_t>(leftover);
       }
       block_offset_ = 0;
     }
@@ -527,6 +542,21 @@ Status WAL::Replay(const ReplayFn& fn, uint64_t* corrupted_at_out) {
   size_t pos = 0;
   bool eof = false;
   while (!eof) {
+    // --- 块尾 padding：writer 在剩余空间 < header 时写 0 填充到块边界 ---
+    //
+    // 这些 0 字节**不是记录**（没有 header）。必须按 block 对齐跳过，
+    // 否则会把它们当 header 解析出垃圾 length/type —— 实测表现为
+    // "WAL unknown record type at offset 32762" 并丢弃该块之后的所有记录。
+    // 用 pos % kLogBlockSize 判断而不是读内容：旧版本 writer 写的是
+    // "7B 全 0 header + leftover 个 0"，同样能被这里跳过去（全 0 也不会被误读）。
+    {
+      const size_t block_remain =
+          static_cast<size_t>(kLogBlockSize) - (pos % kLogBlockSize);
+      if (block_remain < kLogHeaderSize) {
+        pos += block_remain;
+        continue;
+      }
+    }
     // --- 读取一个物理记录（对齐 Reader::ReadPhysicalRecord）---
     if (pos + kLogHeaderSize > file_data.size()) {
       // 文件末尾剩余不足 header：writer 可能在写 header 中途崩溃。

@@ -257,4 +257,67 @@ STRATUM_TEST(WalCorruption, LargeRecordSpanningBlocksSurvivesReplay) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 【WAL block 尾部 padding】记录结束在块尾前 1~6 字节时，后续记录必须仍可读
+//
+// 修复前的实测：第一条逻辑记录写完后 block_offset=32762（剩 6 字节 < 7 字节
+// header），writer 用 EmitPhysicalRecord(kLogZeroType, leftover) 写"7B 头 +
+// 6 字节 0"，header 里 length=6、type=0。Replay 把 type<1 判为 Corruption：
+//   replay: ok=0 code=2 msg=Corruption: WAL unknown record type at offset 32762
+//   count=1（后一条完全正常的记录丢失）
+//
+// 本用例是该 bug 的回归：修复后必须读回 **2 条**，且第二条内容正确。
+// ---------------------------------------------------------------------------
+STRATUM_TEST(WalCorruption, BlockTailPaddingDoesNotHideFollowingRecords) {
+  const std::string dir =
+      std::string("/tmp/stratum_wal_pad_") + UniqueSuffix();
+  const std::string wal_path = dir + "/wal.log";
+  if (system(("rm -rf " + dir).c_str()) != 0) {
+    // 忽略
+  }
+  if (system(("mkdir -p " + dir).c_str()) != 0) {
+    // 忽略
+  }
+
+  // 记录总长 = 7(header) + 17(seq/type/两个长度字段) + key + value。
+  // 令第一条写完时 block_offset = 32762，下一次 Append 就落在 padding 分支。
+  constexpr size_t kKeyLen = 100;
+  const size_t kValueLen = 32762 - 7 - 17 - kKeyLen;   // 32638
+  {
+    lsm::WAL wal;
+    STRATUM_CHECK_OK(wal.Open(wal_path, /*truncate_existing=*/true));
+    STRATUM_CHECK_OK(wal.Append(1, lsm::kTypeValue, std::string(kKeyLen, 'k'),
+                                std::string(kValueLen, 'v'), false));
+    STRATUM_CHECK_EQ(wal.size_bytes(), static_cast<uint64_t>(32762));
+    // 这一条会先触发块尾 padding，再写入真正的记录
+    STRATUM_CHECK_OK(
+        wal.Append(2, lsm::kTypeValue, "after/pad", "ok", false));
+    STRATUM_CHECK_OK(wal.Close());
+  }
+
+  {
+    lsm::WAL wal;
+    STRATUM_CHECK_OK(wal.Open(wal_path, /*truncate_existing=*/false));
+    int count = 0;
+    std::string last_key;
+    std::string last_value;
+    const Status s = wal.Replay(
+        [&](uint64_t, lsm::ValueType, const std::string& k,
+            const std::string& v) {
+          ++count;
+          last_key = k;
+          last_value = v;
+        });
+    STRATUM_CHECK_OK(s);                 // 修复前是 Corruption
+    STRATUM_CHECK_EQ(count, 2);
+    STRATUM_CHECK_EQ(last_key, std::string("after/pad"));
+    STRATUM_CHECK_EQ(last_value, std::string("ok"));
+    wal.Close();
+  }
+
+  if (system(("rm -rf " + dir).c_str()) != 0) {
+    // 忽略
+  }
+}
+
 STRATUM_TEST_MAIN()
