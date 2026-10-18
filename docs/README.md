@@ -34,6 +34,7 @@
 | [`13-probe-requirements.md`](13-probe-requirements.md) | **埋点工程需求分析**：12 个真实场景（含监控回调/格式动态指定/QoS 动态调配/topic 动态配置）、16 条需求（PR-01~16）、边界与非目标 |
 | [`14-verify-business-layer.md`](14-verify-business-layer.md) | **verify 的业务层视角**：为什么 verify 不对业务逻辑下结论、两层设计（分层/启发式）、RC-B1 交叉发现、三个实现坑 |
 | [`15-session-diff.md`](15-session-diff.md) | **会话对比的设计裁决**：三个技术问题（相对时间对齐 / topic 级统计 / 默认不比 payload）+ 核心约束（不判断变好变坏）+ 输出契约 + 测试计划 |
+| [`16-session-merge.md`](16-session-merge.md) | **多会话合并的设计裁决**：三个技术问题（用哪个时钟 / 同名 topic 怎么表示 / 去重按什么）+ 核心约束（不判断数据对错）+ 局限（时钟偏差、跳变被抹平）+ 输出契约 + 测试计划 |
 | [`handoff-readme.md`](handoff-readme.md) | 历史：本项目早期的"文档集索引"（已由根 README 取代） |
 
 ---
