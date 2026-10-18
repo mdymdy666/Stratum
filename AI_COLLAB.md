@@ -9901,3 +9901,88 @@ standalone/config:  独立可构建，91 断言全过
 主项目 ctest:       65 / 65
 ```
 
+
+---
+
+## 2026-10-18（续 136）| stratum session merge · 三步：裁决 → 实现 → 测试
+
+### 一、裁决（`docs/16-session-merge.md`，先写文档再写代码）
+
+| 问题 | 裁决 | 关键理由 |
+|---|---|---|
+| 用哪个时钟对齐 | **`source_timestamp_ns`，按绝对值合并，不做重定基**；`reception` 只在 source 无效时兜底并计数 | 同一发布者的同一条广播，在两个接收端拿到的 source 是**同一个数**（`recorder.cc` 只在缺失时退化）；reception 差一个网络往返 —— 用它对齐等于把要消除的误差当基准 |
+| 同名 topic 怎么表示 | **合成一个，名字原样保留**；来源信息只进报告 | 加前缀会同时弄坏三件事：`_probe.` 探针分类失效、`diff` 按 topic 名配对退化成全量增删、现有 `query` 脚本查不到 |
+| 去重按什么 | **`(topic, 合并后 source_ts, payload_hash)` 三元组，仅跨源，默认开启** | `seq` 是录制器本地分配的（`types.h` 明写），跨会话不可比；只看 payload 哈希会删掉真实重复发布；reception 永远不等 |
+
+核心约束：**合并不判断数据对错**（不修正、不补齐、不删源数据，只把多份放到同一时间轴）。
+输出里 `note` 字段是契约。有冲突或可疑时钟偏差 → **5 PARTIAL**（合并成功但需要人看）。
+
+三条局限写进文档（不能只写代码注释）：
+① 发布端时钟不同源 → 跨源先后/间隔不可信；② 时钟跳变会被合并抹平；
+③ 合并只传递精度、不改善精度，合并产物的 `verify` 结论**不能反推源**。
+
+### 二、实现（`src/cli/cmd_merge.cc`，1116 行）
+
+* 复用 `TimelineImplV2` / `Query`：`ListTopics` 拿清单 → `Query::FindTopic`（内部
+  `FindTopicByName`）拿 `topic_id` → `QueryRange` 读事件。**`TopicSummary` 没有
+  `topic_id`，这一步不能省。**
+* 源预检用 `SessionExists + LooksLikeSession`：普通目录不算会话，
+  否则 `Open()` 会在拼错的目录里建出空会话（diff 踩过的同一个坑）。
+* 目标已存在且非空 → `EXISTS(3)`；`--overwrite` 才清空；目标 == 源、或目标是源的父目录
+  → `USAGE(2)`（后者是防 `--overwrite` 把源一起删掉）。
+* 每个话题在内存里按 `(合并后 ts, 源序号, seq)` 排序后分批 `AppendBatch`。
+  **不排序就会让合并会话的 `timestamp_regressions` 暴涨、`verify` 报假故障**
+  （第一版按源顺序写，正是这个问题）。
+* 去重只跨源：`dedup[key] = 首个写出它的源`，同源重复保留（测试专门验证这个越界方向）。
+* 冲突 = 同 topic、同合并后时间戳、不同 payload、跨源 → 两条都保留 + 计数。
+* 时钟偏差观测 = 同 topic、同 payload 哈希、跨源、时间相邻配对，报 `min/max/median`
+  （只报不改；`samples==0` 时明确写"无法观测"）。
+* 输出：JSON（契约字段）+ `--format table` 人类可读 + `--report <文件>` 另存 JSON。
+  偏差警告走 stderr（stdout 保持纯净）。
+
+### 三、测试（`tests/integration/test_merge.cc`，10 个用例，ctest 65 → 75）
+
+| 用例 | 结果 |
+|---|---|
+| SingleSourceIsCopy（用 `diff 源 产物` 当硬判据 + `has_integrity_issue=false`） | ✅ |
+| DisjointTimelineIsUnion（100+80=180，first/last/span 精确） | ✅ |
+| BroadcastDuplicatesAreMerged（115 → 65，dedupe 50，`--dedupe none` → 115） | ✅ |
+| SameSourceNotDeduped（同源同刻同内容 3 条全留，跨源 1 条去掉） | ✅ |
+| ClockSkewDetectionAndOffset（+100ms：80 条 + 退出 5；`--offset -100ms`：40 条 + 退出 0） | ✅ |
+| EmptySource（空+20=20；空+空=0；都不崩） | ✅ |
+| TenSources（10×100=1000，覆盖度 10，产物可查） | ✅ |
+| SameTimestampDifferentPayload（conflicts=5，两条都留，退出 5） | ✅ |
+| CliErrors（NOTFOUND 8 / EXISTS 3 / USAGE 2 ×5 / `--overwrite` 重建 / 失败不建目标） | ✅ |
+| TableMatchesJson（table 有人类可读文本 + 说明；条数与 json 一致） | ✅ |
+
+`ctest -R test_merge` 在 `/UserData/CodexWorkSpace/Stratum-merge/build` 上通过（1.53s）。
+
+### 四、踩到的两件事（都不是功能本身的问题，但都浪费了时间）
+
+**① 工作目录找错，先在 E: 上做了一轮。**
+`ls -d /mnt/e/CodexWorkspace/Stratum-merge` 不存在 → 以为主控没建，就在 E: 建了
+worktree 并提交。真实路径 `/UserData/CodexWorkSpace/Stratum-merge` 一直存在；
+根因是 `ls /UserData/CodexWorkSpace/* | head` 把 `Stratum`/`Stratum-merge` 截掉了
+（字母序排在 `raftKV*`、`ROS` 之后）。**教训：路径确认要用 `ls -d <精确路径>`
+或 `git worktree list`，不要用带 `head` 的宽匹配去下结论。**
+修正方式：`git format-patch` + `git am` 把两个提交原样迁移，内容零改动。
+
+**② 全量 ctest 的假失败：三个既有 suite 不能与另一个 worktree 并发跑。**
+`test_cli_probe` / `test_verify_business` / `test_cli_io_doctor` 使用**硬编码 tag**
+（`/dev/shm/stratum_it_probe_*`、`$HOME/stratum_it_probe_*`、`/dev/shm/stratum_vb_*`）
+和**固定 DDS domain 43**；两个 worktree 同时跑全量会互相抢路径/域 → 假失败。
+另外 fresh worktree 的 `build/tools/` 是空的：`tools/` 不进 CMake，
+`test_cli_io_doctor` 依赖的 `make_timeline` 必须手工生成，
+否则它的 11 个 `MakeSession()` 断言全挂。
+我这边：已在本地 `build/tools/` 手工构建（构建产物不入库），并**等主控放行**后再跑全量；
+期间只跑 `test_merge`（用 `$HOME` 下带 pid 的独有目录，不碰 DDS）。
+
+### 五、状态
+
+```
+worktree: /UserData/CodexWorkSpace/Stratum-merge（分支 feature/session-merge）
+提交:     docs/16 裁决 → 实现+10 测试 → 文档补充（50ms 例子 / payload 1 字节风险）
+单用例:   ctest -R test_merge 通过（1.53s）
+全量:     待主控放行（并发冲突的隔离由另一个 agent 修）
+push:     未执行
+```
