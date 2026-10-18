@@ -405,6 +405,75 @@ STRATUM_TEST(MergeSkew, ClockSkewDetectionAndOffset) {
 }
 
 // ===========================================================================
+// 五之二、阈值两级与 --skew-warn（notice 不改变退出码）
+// ===========================================================================
+//
+// 【为什么需要这条】跨主机 NTP 级别的 1–10ms 偏差是常态。若 1ms 就返回 5，
+// 5 会变成"跨机合并的默认值"，信号失效。所以：
+//   1ms < 幅度 ≤ 阈值（默认 10ms）→ notice（只记录，退出码 0）
+//   幅度 > 阈值                    → warning（退出码 5）
+// 这条用例把两个档位、阈值可配、以及"去重失效 ≠ 退出码 5"都钉住。
+
+STRATUM_TEST(MergeSkew, ThresholdLevels) {
+  const std::string a = TempDir("thr_a");
+  const std::string b = TempDir("thr_b");
+  const std::string c = TempDir("thr_c");
+  const std::string d1 = TempDir("thr_d1") + "/merged";
+  const std::string d2 = TempDir("thr_d2") + "/merged";
+  const std::string d3 = TempDir("thr_d3") + "/merged";
+  std::string err;
+  const TimestampNs base = 1700000000000000000ull;
+  const uint64_t step = 10000000ull;            // 10ms
+  const TimestampNs skew5 = 5000000ull;         // 5ms：NTP 常态
+  // 105ms 而不是 100ms：A 的事件在 0/10/.../190ms，C 若也从 100ms 起，
+  // 会和 A 的 i=10（恰好在 100ms）撞上同一时刻但 payload 不同 —— 那会被正确
+  // 判为冲突（退出 5），把这条用例要验证的东西盖掉。用非整倍数错开。
+  const TimestampNs skew100 = 105000000ull;     // 105ms
+
+  STRATUM_CHECK_TRUE(MakeSession(a, {UniformTopic("sensor/imu", 20, base, step, "e")}, &err));
+  STRATUM_CHECK_TRUE(
+      MakeSession(b, {UniformTopic("sensor/imu", 20, base + skew5, step, "e")}, &err));
+  STRATUM_CHECK_TRUE(
+      MakeSession(c, {UniformTopic("sensor/imu", 20, base + skew100, step, "e")}, &err));
+
+  // 默认阈值 10ms：5ms → notice、退出 0
+  const CliResult m1 = RunCliJson(kCli + " session merge " + a + " " + b + " --to " + d1);
+  STRATUM_CHECK_EQ(m1.code, 0);
+  STRATUM_CHECK_TRUE(HasSub(m1.output, "\"level\":\"notice\""));
+  STRATUM_CHECK_TRUE(HasSub(m1.output, "\"warning\":false"));
+  STRATUM_CHECK_TRUE(HasSub(m1.output, "\"threshold_ns\":10000000"));
+  STRATUM_CHECK_TRUE(HasSub(m1.output, "clock_skew_notice"));
+  // ★ 5ms 已足以让"时间戳必须完全相等"的去重失效 —— 这点必须能从报告看出，
+  //   而且它**不**改变退出码（去重是否生效看 dedupe，不看退出码）。
+  STRATUM_CHECK_EQ(PickInObject(m1.output, "merged", "events"), 40LL);
+  STRATUM_CHECK_EQ(PickInObject(m1.output, "dedupe", "duplicates_removed"), 0LL);
+
+  // 收紧到 1ms：同一个输入变成 warning + 退出 5
+  const CliResult m2 = RunCliJson(kCli + " session merge " + a + " " + b + " --to " + d2 +
+                                  " --skew-warn 1ms");
+  STRATUM_CHECK_EQ(m2.code, 5);
+  STRATUM_CHECK_TRUE(HasSub(m2.output, "\"level\":\"warning\""));
+  STRATUM_CHECK_TRUE(HasSub(m2.output, "\"threshold_ns\":1000000"));
+  STRATUM_CHECK_TRUE(HasSub(m2.output, "clock_skew_suspected"));
+
+  // 放宽到 200ms：100ms 的偏差降级为 notice（脚本自己决定要不要看）
+  const CliResult m3 = RunCliJson(kCli + " session merge " + a + " " + c + " --to " + d3 +
+                                  " --skew-warn 200ms");
+  STRATUM_CHECK_EQ(m3.code, 0);
+  STRATUM_CHECK_TRUE(HasSub(m3.output, "\"level\":\"notice\""));
+  STRATUM_CHECK_TRUE(HasSub(m3.output, "\"threshold_ns\":200000000"));
+  // 这条场景里没有同刻不同内容 —— 5 只能来自"偏差超过阈值"这一个来源
+  STRATUM_CHECK_EQ(PickInObject(m3.output, "dedupe", "conflicts"), 0LL);
+
+  // 非法阈值 → USAGE(2)
+  const CliResult bad = RunCliTable(kCli + " session merge " + a + " --to " +
+                                    TempDir("thr_bad") + "/m --skew-warn 0");
+  STRATUM_CHECK_EQ(bad.code, 2);
+
+  std::printf("      [阈值] 5ms 默认 notice(退出 0)；--skew-warn 1ms → warning(5)；200ms → notice\n");
+}
+
+// ===========================================================================
 // 六、空会话参与合并
 // ===========================================================================
 

@@ -9940,7 +9940,7 @@ standalone/config:  独立可构建，91 断言全过
 * 输出：JSON（契约字段）+ `--format table` 人类可读 + `--report <文件>` 另存 JSON。
   偏差警告走 stderr（stdout 保持纯净）。
 
-### 三、测试（`tests/integration/test_merge.cc`，11 个用例 = 10 个场景 + 1 个随机不变量；
+### 三、测试（`tests/integration/test_merge.cc`，**12 个用例** = 11 个场景 + 1 个随机不变量；
 ctest 65 → **66** —— 一个测试二进制算一个 ctest 条目，之前提交信息里的「→ 75」是错误口径，在此更正）
 
 | 用例 | 结果 |
@@ -9950,6 +9950,7 @@ ctest 65 → **66** —— 一个测试二进制算一个 ctest 条目，之前�
 | BroadcastDuplicatesAreMerged（115 → 65，dedupe 50，`--dedupe none` → 115） | ✅ |
 | SameSourceNotDeduped（同源同刻同内容 3 条全留，跨源 1 条去掉） | ✅ |
 | ClockSkewDetectionAndOffset（+100ms：80 条 + 退出 5；`--offset -100ms`：40 条 + 退出 0） | ✅ |
+| ThresholdLevels（5ms 默认 → notice+0；`--skew-warn 1ms` → warning+5；200ms → notice+0；非法阈值 → 2） | ✅ |
 | EmptySource（空+20=20；空+空=0；都不崩） | ✅ |
 | TenSources（10×100=1000，覆盖度 10，产物可查） | ✅ |
 | SameTimestampDifferentPayload（conflicts=5，两条都留，退出 5） | ✅ |
@@ -9994,6 +9995,16 @@ worktree 并提交。真实路径 `/UserData/CodexWorkSpace/Stratum-merge` 一�
 * 顺手修掉一个新测试抓到的老问题：`stratum --help` 原先返回 2（与「没给子命令」共用
   分支）；显式请求帮助应当是成功（0）。只改 main.cc 的两行分支，带子命令的
   `--help` 与无参数行为不变。
+* **偏差告警改成两级 + 可配**（评审意见：1ms 阈值会让 5 失去信号意义）：
+  `notice`（1ms < 幅度 ≤ 阈值，只写 `notices[]`，**不改退出码**）/
+  `warning`（> 阈值，默认 **10ms**，退出 5），`--skew-warn <时长>` 可调。
+  理由：跨主机 NTP/chrony 的 1–10ms 是常态，1ms 就返回 5 会让 5 变成"跨机合并的默认值"。
+  同时写明「**去重是否生效与退出码正交**」：去重键要求时间戳完全相等，
+  5ms 偏差已足以让去重失效（条数翻倍），但退出码仍可能是 0 —— 判断去重看
+  `dedupe.duplicates_removed`，不要看退出码。
+* 按评审确认写进 docs/16 §三：**`merge` 不提供 `--probe-prefix`** —— 合并不改 topic 名，
+  给一个"改名"选项等于让已否决的路径从后门回来，还会破坏 `_probe.` 分类。
+
 
 **未完成（明确列出）**
 
@@ -10027,7 +10038,7 @@ worktree: /UserData/CodexWorkSpace/Stratum-merge（分支 feature/session-merge�
           → ff5b00c 文档补充（50ms 例子 / payload 1 字节风险）
           → a098fae 随机不变量用例
           → a039953 --help + table 断言 + `--help` 退出码修正
-单用例:   ctest -R test_merge 通过（11 个用例）
+单用例:   ctest -R test_merge 通过（12 个用例）
 全量:     66/66 通过（214s，独占跑，实测于 3dc4f21/a098fae 一线；
           之后只改 help 分支与测试断言，定向复验 test_merge / test_cli_runner /
           test_stdout_purity / test_cli_io_doctor 4/4 通过）

@@ -89,18 +89,35 @@ merged_ts = source_timestamp_ns + 该源的 --offset（默认 0）
 
 ```json
 "alignment": {"skew": {"samples": 120, "min_ns": 99920000, "max_ns": 100080000,
-                       "median_ns": 100000000, "warning": true}}
+                       "median_ns": 100000000, "threshold_ns": 10000000,
+                       "level": "warning", "warning": true}}
 ```
 
 **这只是观测，不是判定**：它也可能是"同一条 payload（例如心跳/恒定温度）
 隔了一段时间又发了一次"。所以报告用 `samples/min/max/median` 而不是一个
 "偏差 = 100ms"的结论，并把它和 `--offset` 的用法写在一起。
 
-判据（可执行的信号）：
+判据（**两级**，默认阈值 10ms，可用 `--skew-warn` 改）：
 
 ```
-|median_ns| > 1ms  或  (max_ns - min_ns) > 1ms  →  clock_skew.warning = true
+magnitude = max(|median_ns|, max_ns - min_ns)
+
+magnitude >  阈值（默认 10ms）   →  skew.level = "warning"  →  退出码 5
+1ms < magnitude ≤ 阈值          →  skew.level = "notice"   →  退出码不变（只记录）
+magnitude ≤ 1ms                 →  skew.level = "none"
 ```
+
+**为什么默认是 10ms 而不是 1ms**：跨主机部署时，NTP/chrony 级别的钟差 **1–10ms 是常态**。
+若超过 1ms 就返回 5，几乎每次跨机合并都会命中 —— 5 就从"需要你看一眼"退化成
+"跨机合并的默认值"。而 CI 里经常红的检查最终会被人加 `|| true` 绕过，等于没有信号。
+10ms 则已经足以在常见 DDS 周期（1–10ms，100–1000Hz）上把相邻样本的顺序颠倒，
+到这一步确实值得人看。1–10ms 之间**不吞掉**：标 `notice`，写进 JSON 的 `notices[]`，
+但不改退出码；需要严格判定的脚本用 `--skew-warn 1ms` 自己收紧。
+
+**去重是否生效与退出码正交**（这条容易被误读）：去重键要求时间戳**完全相等**，
+所以哪怕 1ms 的偏差也会让去重失效（`duplicates_removed=0`、条数翻倍）。
+默认阈值下 5ms 的偏差是 `notice`/退出 0，但去重同样没生效。
+**判断去重有没有发生，看 `dedupe.duplicates_removed`，不要看退出码。**
 
 ### 一个具体数字的例子：50ms 钟差到底会影响什么
 
@@ -198,6 +215,11 @@ source 缺失时才退化为 reception。所以 A、B 两份录制里同一条�
    报告变成"全部 added、全部 removed"，这正是 diff 存在的意义被抹掉。
 3. **`query` 的既有脚本会查不到。** 用户和脚本按真实 DDS topic 名查询；
    改名等于要求所有人改脚本，而改名后的名字在 DDS 世界里**并不存在**。
+
+**为什么 `merge` 不提供 `--probe-prefix`**（有人问过）：合并本身**不改 topic 名**；
+给它一个"改名"选项，等于让本节刚否决的路径从后门溜回来，而且会让 `_probe.` 分类
+在合并产物里失效。探针前缀是**下游**（`verify` / `metrics` / `diff`）的判定参数，
+不是合并的参数。
 
 **代价（必须承认）**：合并产物**不保留逐事件来源**。合并会话回答的是
 "这条时间轴上发生过什么"，不是"这条是谁记的"。需要逐源归因时，
@@ -346,12 +368,13 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
   --overwrite              目标非空时先清空（危险操作，必须显式）
   --dedupe content|none    去重策略（默认 content）
   --offset <会话>=<±时长>  给某个源加固定偏移（可重复），用于时钟偏差校正
+  --skew-warn <时长>       偏差告警阈值（默认 10ms）；超过才 warning + 退出 5
   --report <文件>          额外把合并报告（JSON）写到文件
   --help, -h               本命令的选项说明
 ```
 
-`--offset` 的时长单位支持 `ms/s/m/h/d/w`（**最小 1ms，不支持 ns/us**）；
-时钟偏差的告警阈值也是 1ms —— 两者保持一致，避免"工具看不出自己校正过的量"。
+`--offset` 与 `--skew-warn` 的时长单位都支持 `ms/s/m/h/d/w`（**最小 1ms，不支持 ns/us**）。
+偏差的 `notice` 下限固定 1ms，`warning` 阈值默认 10ms —— 见 §二 为什么不是 1ms。
 
 ### JSON（默认；全局 `--format` 非 TTY 时为 json）
 
@@ -368,13 +391,14 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
     "fallback_to_reception": 0,
     "offsets": [{"session": "/data/nodeA", "offset_ns": 0},
                 {"session": "/data/nodeB", "offset_ns": -100000000}],
-    "skew": {"samples": 120, "min_ns": 0, "max_ns": 0, "median_ns": 0, "warning": false}
+    "skew": {"samples": 120, "min_ns": 0, "max_ns": 0, "median_ns": 0,
+             "threshold_ns": 10000000, "level": "none", "warning": false}
   },
   "sources": [{
     "session": "/data/nodeA", "label": "nodeA",
     "events": 1000, "topics": 3, "bytes": 40000,
-    "first_ns": 1792228100100000000, "last_ns": 1792228110000000000,
-    "origin_ns": 1792228100100000000, "offset_ns": 0,
+    "origin_ns": 1792228100100000000, "last_ns": 1792228110000000000,
+    "offset_ns": 0,
     "contributed": 900, "duplicates": 100, "conflicts": 0,
     "fallback_to_reception": 0, "clamped_timestamps": 0,
     "quality": {"dropped": 0, "sequence_gaps": 0, "missing_messages": 0,
@@ -389,6 +413,7 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
              "key": "(topic,source_timestamp,payload_hash)", "hash": "fnv1a64",
              "duplicates_removed": 100, "conflicts": 0},
   "warnings": [],
+  "notices": [],
   "note": "合并不判断数据对错，只把多份放在同一时间轴上 ..."
 }
 ```
@@ -400,12 +425,16 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 | `merged.events` | **写入目标后**的条数（已去重） |
 | `sources[].events` | 该源**原有**条数 |
 | `sources[].contributed` | 该源实际写进目标的条数（= events − duplicates） |
+| `sources[].origin_ns` | 源自己最早事件的时刻（未加 offset）；与 `offset_ns` 相加就是它在合并轴上的起点 |
 | `sources[].offset_ns` | **实际应用**的偏移（含 `--offset` 与时间戳钳制前的值） |
 | `fallback_to_reception` | source 时间戳无效（== 0）而改用 reception 的条数；>0 说明源数据元信息不全 |
 | `clamped_timestamps` | `source + offset <= 0` 被钳到 1ns 的条数；>0 说明偏移给大了 |
 | `topics[].sources` | 该 topic 出现在几个源里（**覆盖度**，不是事件来源） |
 | `dedupe.conflicts` | 同名同刻不同内容的跨源事件数（两条都保留） |
 | `alignment.skew.*` | 观测到的"同 payload 不同时刻"的差；**不是判定**（§二） |
+| `skew.level` | `none` / `notice`（1ms < 幅度 ≤ 阈值，只记录）/ `warning`（> 阈值，退出码 5） |
+| `skew.threshold_ns` | 本次使用的阈值（默认 10ms，可由 `--skew-warn` 改） |
+| `notices[]` | 不影响退出码的提示（目前只有 `clock_skew_notice`） |
 
 ### 退出码
 
@@ -415,13 +444,17 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 | 1 | ERROR（写目标失败） |
 | 2 | USAGE（参数不足 / 目标与源相同 / 选项非法） |
 | 3 | EXISTS（目标已存在且非空，未给 `--overwrite`） |
-| **5** | **PARTIAL**：合并完成，但**有冲突或有可疑时钟偏差** |
+| **5** | **PARTIAL**：合并完成，但**有冲突，或偏差幅度超过阈值（默认 10ms）** |
 | 6 | ENV（源会话打不开 / 目标目录不可写） |
 | 8 | NOTFOUND（源会话不存在） |
 
 **为什么"有冲突"用 5 而不是 0**：合并**成功了**（这是 0 的一半），
 但产物里有需要人看的东西（这是 5 的一半）。这与 `diff` 用 5 表达
 "有差异"是同一个约定：**脚本要能区分"干净"与"需要人看"**。
+
+**notice 不改变退出码**：偏差在 1ms–阈值之间时只在 `notices[]` 里留一条，
+退出码仍是 0。这是刻意的 —— 让 5 保持"真值得停下来看"的含义（理由见 §二）。
+若你的场景对时间更敏感，用 `--skew-warn` 把阈值调小，让 5 更早触发。
 
 ### 文本输出（`--format table`）
 
@@ -431,16 +464,19 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
   方式: 绝对时间轴（source_timestamp_ns）；跨源去重（content）
 
 来源（2）:
-  nodeA  /data/nodeA   1000 条 / 3 topic   偏移 +0ns
+  nodeA  /data/nodeA
+         1000 条 / 3 topic   偏移 +0.00ms
          写入 900 条，去重 100 条
-  nodeB  /data/nodeB   1000 条 / 3 topic   偏移 -100.00ms
-         写入 900 条，去重 100 条
+  nodeB  /data/nodeB
+         1000 条 / 3 topic   偏移 -100.00ms
+         写入 900 条，去重 100 条，冲突 0 处
 
 话题（4）:
-  sensor/imu        2 个源   180 条（去重 20）   1792228100.100 ~ 1792228110.000
-  sensor/temp       1 个源   100 条
+  sensor/imu                       2 个源   180 条（去重 20）  1792228100.100 (...) ~ 1792228110.000 (...)
+  sensor/temp                      1 个源   100 条  1792228100.100 (...) ~ 1792228101.100 (...)
 
-时钟偏差观测: 120 对同内容记录，偏差 0.000ms（min 0.000 / max 0.000）
+时钟偏差观测: 120 对同内容记录，中位偏差 +0.00ms（min +0.00ms / max +0.00ms）
+  级别: none（阈值 10.00ms）
 冲突: 0 处（同名同刻不同内容，两条均保留）
 
 说明: 合并不判断数据对错，只把多份放在同一时间轴上。
@@ -491,7 +527,7 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 
 ---
 
-## 九、测试计划（进 ctest：**新增 1 个测试二进制** `test_merge`，内含 10 个场景用例 + 1 个随机不变量用例；ctest 65 → 66）
+## 九、测试计划（进 ctest：**新增 1 个测试二进制** `test_merge`，内含 11 个场景用例 + 1 个随机不变量用例；ctest 65 → 66）
 
 | 用例 | 验证什么 |
 |---|---|
@@ -499,7 +535,8 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 | **DisjointTimeline** | 两源无时间重叠 → 条数 = 之和、`span` = 并集、`first/last_ns` 精确 |
 | **★ BroadcastDedup** | 两源都收到同一批（同 topic/ts/payload）→ 合并条数 = 1 份、`duplicates_removed` 精确、退出码 0；`--dedupe none` 全保留 |
 | **★ SameSourceNotDeduped** | 同源同刻同内容 3 条全保留，只有跨源的 1 条被去掉（去重只在跨源生效） |
-| **★ ClockSkewOffset** | B 的源时间戳整体 +100ms：默认 → 重复判定失效（条数翻倍）+ `skew.warning=true`；给 `--offset B=-100ms` → 去重生效、条数回到 1 份 |
+| **★ ClockSkewOffset** | B 的源时间戳整体 +100ms：默认 → 重复判定失效（条数翻倍）+ `skew.level=warning`、退出 5；给 `--offset B=-100ms` → 去重生效、条数回到 1 份、退出 0 |
+| **★ ThresholdLevels** | 5ms 偏差（默认 10ms 阈值）→ `level=notice`、退出 0、去重仍失效（`duplicates_removed=0`）；`--skew-warn 1ms` → warning+5；`--skew-warn 200ms` + 105ms 偏差 → notice+0；非法阈值 → 2 |
 | **EmptySource** | 空会话参与合并（一空一非空 / 两空）→ 不崩、条数正确、空源 `contributed=0` |
 | **TenSources** | 10 个源 → 条数 = 1000、每源 `contributed` 正确、topic 覆盖度 10、产物可查 |
 | **SameTimestampDifferentPayload** | 同名同刻不同 payload → `conflicts` 精确、两条都保留、退出码 5（PARTIAL） |
@@ -522,6 +559,7 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 | 2026-10-18 15:40 | 补「payload 只差一个字节」的风险与方向性：宁可少去重（可见的条数偏高）不可误删（不可见的数据丢失）；给出排查步骤，明确不做 CDR 剥离/模糊匹配 |
 | 2026-10-18 16:05 | 更正计数口径：11 个是 `test_merge` 内的**用例数**，ctest 的测试数是 65 → **66**（一个测试二进制算一个 ctest 条目）；补「保留哪一条」的规则（源参数顺序最靠前者胜出）与随机不变量用例 |
 | 2026-10-18 16:12 | 补 `--help`（子命令级 + 全局 help 里的选项块）；把 `--format table` 的输出段落写进自动化断言（含"table 里不能混进 JSON"）；明确 `--offset` 最小粒度 1ms |
+| 2026-10-18 16:35 | **修改裁决的判据**：偏差告警从「1ms 就 warning」改成**两级**（1ms–阈值 = notice 且不改退出码；> 阈值 = warning + 退出 5），默认阈值 10ms、可用 `--skew-warn` 调；补充「去重是否生效与退出码正交」；补「不提供 `--probe-prefix`」的理由 |
 
 ---
 

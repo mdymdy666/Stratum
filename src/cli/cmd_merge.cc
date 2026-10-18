@@ -63,11 +63,16 @@ namespace cli {
 
 namespace {
 
-// 时钟偏差告警阈值：同一份内容在两个源里相差超过 1ms，就值得人看一眼。
-// 【为什么是 1ms】单机内 source 时间戳是发布端打的，同一条消息应当**逐位相同**；
-// 任何非零差都可能来自时钟不同源。但 payload 相同也可能是真实的重复发布，
-// 所以这只是"观测 + 提示"，不是判定（见 docs/16 §二）。
-constexpr int64_t kSkewWarnNs = 1000000;
+// 时钟偏差告警阈值（默认 10ms）与 notice 档（1ms）。
+//
+// 【为什么默认不是 1ms】跨主机部署时，NTP/chrony 级别的钟差 1–10ms 是**常态**。
+// 若超过 1ms 就 warning + 退出 5，几乎每次跨机合并都会命中 —— 5 就从
+// "需要人看一眼"退化成"跨机合并的默认值"，CI 里迟早被人用 `|| true` 绕过。
+// 而 10ms 已经足以在常见 DDS 周期（1–10ms，100–1000Hz）上把相邻样本顺序颠倒，
+// 所以超过 10ms 确实值得人看。1–10ms 之间不吞掉：标 notice，只记录、不改退出码，
+// 需要严格判定的脚本用 --skew-warn 自己收紧。
+constexpr int64_t kSkewWarnDefaultNs = 10000000;   // 10ms
+constexpr int64_t kSkewNoticeNs = 1000000;         // 1ms
 
 // 时钟偏差观测的样本上限（防止大会话把内存吃光；统计量对样本数不敏感）
 constexpr size_t kMaxSkewSamples = 20000;
@@ -174,9 +179,12 @@ struct MergeReport {
   int64_t skew_min_ns = 0;
   int64_t skew_max_ns = 0;
   int64_t skew_median_ns = 0;
-  bool skew_warning = false;
+  int64_t skew_threshold_ns = kSkewWarnDefaultNs;
+  // none / notice（1ms–阈值，只记录）/ warning（>阈值，退出码 5）
+  std::string skew_level = "none";
 
-  std::vector<std::string> warnings;
+  std::vector<std::string> warnings;   // 影响退出码（5）
+  std::vector<std::string> notices;    // 只记录，不影响退出码
 
   bool HasWarnings() const { return !warnings.empty(); }
 };
@@ -603,7 +611,7 @@ bool WriteTarget(const std::string& target,
 void FinalizeSkew(MergeReport* r) {
   if (r->skew_deltas.empty()) {
     r->skew_min_ns = r->skew_max_ns = r->skew_median_ns = 0;
-    r->skew_warning = false;
+    r->skew_level = "none";
     return;
   }
   std::vector<int64_t> v = r->skew_deltas;
@@ -611,8 +619,21 @@ void FinalizeSkew(MergeReport* r) {
   r->skew_min_ns = v.front();
   r->skew_max_ns = v.back();
   r->skew_median_ns = v[v.size() / 2];
-  r->skew_warning = (std::llabs(r->skew_median_ns) > kSkewWarnNs) ||
-                    ((r->skew_max_ns - r->skew_min_ns) > kSkewWarnNs);
+
+  // 取"中位偏差"与"极差"的较大者作为观测强度：
+  //   中位偏差代表系统性钟差（所有配对都差同一个量）
+  //   极差代表不一致（有的大有的小 —— 更像重复内容而不是钟差）
+  const int64_t median_abs =
+      (r->skew_median_ns < 0) ? -r->skew_median_ns : r->skew_median_ns;
+  const int64_t spread = r->skew_max_ns - r->skew_min_ns;
+  const int64_t magnitude = std::max(median_abs, spread);
+  if (magnitude > r->skew_threshold_ns) {
+    r->skew_level = "warning";
+  } else if (magnitude > kSkewNoticeNs) {
+    r->skew_level = "notice";
+  } else {
+    r->skew_level = "none";
+  }
 }
 
 std::string BuildJson(const MergeReport& r) {
@@ -642,11 +663,14 @@ std::string BuildJson(const MergeReport& r) {
             static_cast<long long>(r.sources[i].applied_offset_ns));
   }
   Appendf(&o, "],\"skew\":{\"samples\":%zu,\"min_ns\":%lld,\"max_ns\":%lld,"
-              "\"median_ns\":%lld,\"warning\":%s}},",
+              "\"median_ns\":%lld,\"threshold_ns\":%lld,\"level\":\"%s\","
+              "\"warning\":%s}},",
           r.skew_deltas.size(), static_cast<long long>(r.skew_min_ns),
           static_cast<long long>(r.skew_max_ns),
           static_cast<long long>(r.skew_median_ns),
-          r.skew_warning ? "true" : "false");
+          static_cast<long long>(r.skew_threshold_ns),
+          r.skew_level.c_str(),
+          (r.skew_level == "warning") ? "true" : "false");
 
   Appendf(&o, "\"sources\":[");
   for (size_t i = 0; i < r.sources.size(); ++i) {
@@ -706,6 +730,11 @@ std::string BuildJson(const MergeReport& r) {
   for (size_t i = 0; i < r.warnings.size(); ++i) {
     if (i) Appendf(&o, ",");
     Appendf(&o, "\"%s\"", JsonEscape(r.warnings[i]).c_str());
+  }
+  Appendf(&o, "],\"notices\":[");
+  for (size_t i = 0; i < r.notices.size(); ++i) {
+    if (i) Appendf(&o, ",");
+    Appendf(&o, "\"%s\"", JsonEscape(r.notices[i]).c_str());
   }
   Appendf(&o, "],");
 
@@ -805,12 +834,19 @@ void PrintTable(const MergeReport& r, const GlobalOptions& g) {
   if (r.skew_deltas.empty()) {
     std::printf("\n时钟偏差观测: 没有「同内容跨源」样本（无法观测，不代表没有偏差）\n");
   } else {
-    std::printf("\n时钟偏差观测: %zu 对同内容记录，中位偏差 %s（min %s / max %s）%s\n",
+    std::printf("\n时钟偏差观测: %zu 对同内容记录，中位偏差 %s（min %s / max %s）\n",
                 r.skew_deltas.size(),
                 HumanOffset(r.skew_median_ns).c_str(),
                 HumanOffset(r.skew_min_ns).c_str(),
-                HumanOffset(r.skew_max_ns).c_str(),
-                r.skew_warning ? "  ** 可疑 **" : "");
+                HumanOffset(r.skew_max_ns).c_str());
+    std::printf("  级别: %s（阈值 %s）", r.skew_level.c_str(),
+                HumanSpan(static_cast<uint64_t>(r.skew_threshold_ns)).c_str());
+    if (r.skew_level == "warning") {
+      std::printf("  ** 超过阈值：可能是时钟不同源，可用 --offset 校正 **");
+    } else if (r.skew_level == "notice") {
+      std::printf("  （超过 1ms 但未超阈值，只记录，不影响退出码）");
+    }
+    std::printf("\n");
   }
   std::printf("冲突: %llu 处（同名同刻不同内容，两条均保留）\n",
               static_cast<unsigned long long>(r.conflicts));
@@ -879,10 +915,12 @@ void PrintMergeHelp() {
       "  --dedupe content|none    跨源去重策略（默认 content）；none = 全部保留\n"
       "  --offset <会话>=<+-时长>  给某个源加固定偏移，用于时钟偏差校正（可重复）\n"
       "                           <会话> 可用完整路径或源标签（目录名）；最小 1ms\n"
+      "  --skew-warn <时长>       偏差告警阈值（默认 10ms）；超过才 warning + 退出 5\n"
+      "                           1ms–阈值之间只标 notice（不影响退出码）\n"
       "  --report <文件>          把合并报告（JSON）另存到文件\n"
       "  --help, -h               本说明\n"
       "\n"
-      "退出码: 0 成功 / 5 合并完成但有冲突或可疑时钟偏差 / 8 源不存在 /\n"
+      "退出码: 0 成功 / 5 合并完成但有冲突或偏差超过阈值 / 8 源不存在 /\n"
       "        3 目标已存在 / 2 用法错误 / 6 环境不可写 / 1 写入失败\n"
       "\n"
       "说明: 合并不判断数据对错，只把多份放在同一时间轴上；\n"
@@ -900,6 +938,7 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
   std::string to;
   std::string report_path;
   std::string dedupe_mode = "content";
+  int64_t skew_warn_ns = kSkewWarnDefaultNs;
   bool overwrite = false;
 
   for (size_t i = 0; i < args.size(); ++i) {
@@ -945,10 +984,22 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
       offset_specs.push_back(*v);
       continue;
     }
+    if (a == "--skew-warn") {
+      const std::string* v = NextValue("--skew-warn");
+      if (v == nullptr) return kUsage;
+      uint64_t d = 0;
+      if (!ParseDurationNs(*v, &d) || d == 0) {
+        return Fail(kUsage, "--skew-warn 取值非法: " + *v,
+                    "需要正的时长（ms/s/m/h/d/w，最小 1ms）",
+                    "例如 --skew-warn 10ms；超过该值才 warning + 退出码 5");
+      }
+      skew_warn_ns = static_cast<int64_t>(d);
+      continue;
+    }
     if (a == "--overwrite") { overwrite = true; continue; }
     if (!a.empty() && a[0] == '-') {
       return Fail(kUsage, "session merge 不支持该选项: " + a,
-                  "支持 --to / --dedupe / --offset / --overwrite / --report",
+                  "支持 --to / --dedupe / --offset / --skew-warn / --overwrite / --report",
                   "完整说明见 docs/16-session-merge.md");
     }
     positional.push_back(a);
@@ -1032,6 +1083,7 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
   MergeReport report;
   report.target = to;
   report.dedupe_mode = dedupe_mode;
+  report.skew_threshold_ns = skew_warn_ns;
 
   // --- 第一遍：扫描所有源 ---
   for (const auto& spec : specs) {
@@ -1091,10 +1143,14 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
         "conflicts: 存在同名同刻不同内容的跨源记录（两条均保留），"
         "这通常意味着两个节点上的同名 topic 是不同数据流");
   }
-  if (report.skew_warning) {
+  if (report.skew_level == "warning") {
     report.warnings.push_back(
-        "clock_skew_suspected: 同内容记录在不同源里相差超过 1ms，"
+        "clock_skew_suspected: 同内容记录在不同源里相差超过阈值（默认 10ms），"
         "可能是时钟不同源；确认后可用 --offset 校正（工具不会自动校正）");
+  } else if (report.skew_level == "notice") {
+    report.notices.push_back(
+        "clock_skew_notice: 同内容记录跨源相差超过 1ms 但未超过阈值，"
+        "已记录但不影响退出码；需要严格判定时用 --skew-warn 收紧");
   }
   if (report.fallback_to_reception > 0) {
     report.warnings.push_back(
@@ -1110,11 +1166,12 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
         "type_conflicts: 同名 topic 在不同源里类型不同，已取第一个非空类型");
   }
 
-  if (report.skew_warning && !g.quiet) {
+  if (report.skew_level == "warning" && !g.quiet) {
     std::fprintf(stderr,
-                 "警告: 同内容记录跨源时间差中位数 %.2fms（超过 1ms），"
+                 "警告: 同内容记录跨源时间差中位数 %.2fms（超过阈值 %.2fms），"
                  "可能是时钟不同源；合并结果的时间关系需谨慎解读\n",
-                 static_cast<double>(report.skew_median_ns) / 1e6);
+                 static_cast<double>(report.skew_median_ns) / 1e6,
+                 static_cast<double>(report.skew_threshold_ns) / 1e6);
   }
 
   const std::string json = BuildJson(report);

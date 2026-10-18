@@ -61,6 +61,7 @@ void PrintHelp() {
       "  --overwrite                     目标非空时先清空\n"
       "  --dedupe content|none           跨源去重（默认 content）\n"
       "  --offset <会话>=<±时长>         固定偏移校正（可重复，最小 1ms）\n"
+      "  --skew-warn <时长>              偏差告警阈值（默认 10ms；超过才退出 5）\n"
       "  --report <文件>                 合并报告另存为 JSON\n"
       "  设计裁决（时钟/同名 topic/去重）见 docs/16-session-merge.md\n"
       "\n"
