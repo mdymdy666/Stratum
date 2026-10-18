@@ -637,7 +637,23 @@ STRATUM_TEST(MergeErrors, CliErrors) {
   const CliResult r9 = RunCliTable(kCli + " session merge " + src + " --to /");
   STRATUM_CHECK_EQ(r9.code, 2);
 
-  std::printf("      [错误] NOTFOUND×1 / EXISTS×1 / USAGE×6，且失败不创建目标\n");
+  // 9) 目标非空但**不是会话** + --overwrite → USAGE(2)，且目录内容必须原封不动。
+  //    结构守卫：合并只会写会话，删除非会话目录永远不是必要的。
+  const std::string plain = TempDir("err_plain");
+  {
+    std::ofstream f(plain + "/keep.txt");
+    f << "keep";
+  }
+  const CliResult r10 =
+      RunCliTable(kCli + " session merge " + src + " --to " + plain + " --overwrite");
+  STRATUM_CHECK_EQ(r10.code, 2);
+  STRATUM_CHECK_TRUE(std::filesystem::exists(plain + "/keep.txt"));
+
+  // 10) 目标写 //（规范化后是根目录）→ USAGE(2)
+  const CliResult r11 = RunCliTable(kCli + " session merge " + src + " --to //");
+  STRATUM_CHECK_EQ(r11.code, 2);
+
+  std::printf("      [错误] NOTFOUND×1 / EXISTS×1 / USAGE×8，且失败不删除/不创建目标\n");
 }
 
 // ===========================================================================

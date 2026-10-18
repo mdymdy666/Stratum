@@ -1040,6 +1040,15 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
                 "合并会在目标位置建会话；--overwrite 时还会先清空目标",
                 "换一个具体目录，例如 --to /data/merged");
   }
+  // 同类的第二道：HOME 目录（规范化后比较，软链接/相对路径都覆盖）。
+  {
+    const char* home = std::getenv("HOME");
+    if (home != nullptr && home[0] != '\0' && target_canon == Canonical(home)) {
+      return Fail(kUsage, "目标不能是 HOME 目录: " + to,
+                  "合并 --overwrite 会清空目标；HOME 下是个人数据",
+                  "换一个具体目录，例如 --to $HOME/merge/merged");
+    }
+  }
 
   for (const auto& p : positional) {
     if (Canonical(p) == target_canon) {
@@ -1066,6 +1075,17 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
       return Fail(kExists, "目标已存在且非空，拒绝写入: " + to,
                   "目标里已有数据，合并会往里追加一个来源不明的时间线",
                   "换一个 --to；确实要重建时显式加 --overwrite（会先清空目标）");
+    }
+    // 【结构守卫】--overwrite 只允许清空**看起来像会话**的目录。
+    //
+    // 路径级守卫（根目录 / HOME / 源的祖先）挡不住"深度足够且不在这些名单里"的
+    // 任意目录；而合并只会写会话，**删除非会话目录永远不是必要的**。
+    // 这条守卫让"用户手滑把 --overwrite 指向 /data 或某个项目目录"变成拒绝，
+    // 而不是删除 —— 比任何路径黑名单都强。
+    if (!LooksLikeSession(fs::path(to))) {
+      return Fail(kUsage, "目标非空且不是会话目录，拒绝清空: " + to,
+                  "--overwrite 只清空会话目录（含 CURRENT / MANIFEST-*）",
+                  "换一个 --to；若确实要清理该目录，请先手工确认再自行处理");
     }
     std::error_code ec;
     fs::remove_all(to, ec);
