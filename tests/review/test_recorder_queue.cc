@@ -260,4 +260,49 @@ STRATUM_TEST(RecorderQueue, M1_BlockPolicyKeepsQueueBounded) {
   STRATUM_CHECK_TRUE(stats.received > static_cast<uint64_t>(kCount / 10));
 }
 
+// ---------------------------------------------------------------------------
+// 【配置边界】write_batch_size = 0 / 超大值必须在 Start 前被拒绝
+//
+// 修复前的实测行为（见 AI_COLLAB 本轮记录）：
+//   · 0         ：WriterLoop 的 `batch.size() < write_batch_size` 永不成立，
+//                 队列里只要有一条，就再也不会被消费；Stop() 永久阻塞
+//                 （手工复现：received=1 recorded=0 queue=1，Stop 3 秒不返回）
+//   · SIZE_MAX  ：WriterLoop 启动即 batch.reserve(SIZE_MAX) → std::length_error
+//                 → 线程内无人捕获 → std::terminate
+//                 （CLI 复现：--write-batch-size -1 → rc=134）
+//
+// 修复后：Start() 返回 kInvalidArgument，状态机保持在 kIdle（可重试）。
+// ---------------------------------------------------------------------------
+STRATUM_TEST(RecorderQueue, RejectsInvalidWriteBatchSize) {
+  auto engine = StorageEnginePtr(new MemoryEngine());
+  TimelineImpl timeline(std::move(engine));
+  STRATUM_CHECK_OK(timeline.Open("mem://wbs-invalid"));
+
+  MockBackend backend;
+  Recorder recorder(&timeline, &backend);
+  RecorderConfig cfg;
+  cfg.close_timeline_on_stop = false;
+
+  cfg.write_batch_size = 0;
+  Status s = recorder.Start(cfg);
+  STRATUM_CHECK_FALSE(s.ok());
+  STRATUM_CHECK_EQ(static_cast<int>(s.code()),
+                   static_cast<int>(StatusCode::kInvalidArgument));
+
+  // 与 CLI `--write-batch-size -1` 经 strtoul 后等价的值
+  cfg.write_batch_size = static_cast<size_t>(-1);
+  s = recorder.Start(cfg);
+  STRATUM_CHECK_FALSE(s.ok());
+  STRATUM_CHECK_EQ(static_cast<int>(s.code()),
+                   static_cast<int>(StatusCode::kInvalidArgument));
+
+  // 【关键】被拒后状态必须仍是 kIdle：合法配置应能启动。
+  // 若校验发生在状态机抢占之后，这里会卡在 kStarting。
+  cfg.write_batch_size = 256;
+  STRATUM_CHECK_OK(recorder.Start(cfg));
+  STRATUM_CHECK_OK(recorder.Stop());
+
+  std::printf("      [配置] 0 / SIZE_MAX 均被拒（InvalidArgument），合法值 256 仍可启动\n");
+}
+
 STRATUM_TEST_MAIN()

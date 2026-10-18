@@ -38,6 +38,25 @@ Status Recorder::Start(const RecorderConfig& config) {
     return Status::InvalidArgument("backend is null");
   }
 
+  // 【配置校验：write_batch_size】这个值是 WriterLoop 的**出队上限**，
+  // 两个非法取值都会造成灾难性后果，且都不会报错：
+  //   · 0  → `while (batch.size() < 0)` 永不成立 → 队列永不消费，
+  //          有数据后写盘线程空转、Stop() 永久阻塞（实测：queue=1、
+  //          recorded=0、Stop 3 秒不返回）
+  //   · 超大（例如 `--write-batch-size -1` 经 strtoull 变成 SIZE_MAX）
+  //          → batch.reserve() 抛 std::length_error，线程里无人捕获
+  //          → std::terminate（实测 SIGABRT，rc=134）
+  // 在启动前挡掉，把"无法诊断的挂起/崩溃"变成一条可读的 InvalidArgument。
+  constexpr size_t kMaxWriteBatchSize = 1000000;  // 100 万/批已远超合理值
+  if (config.write_batch_size == 0 ||
+      config.write_batch_size > kMaxWriteBatchSize) {
+    return Status::InvalidArgument(
+        "write_batch_size must be in [1, " +
+        std::to_string(kMaxWriteBatchSize) + "], got " +
+        std::to_string(config.write_batch_size) +
+        "（0 会让后台线程永不消费队列，过大会在 reserve 时抛异常）");
+  }
+
   // --- 状态机：抢占 kIdle → kStarting ---
   {
     std::lock_guard<std::mutex> lock(state_mutex_);

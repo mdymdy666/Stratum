@@ -10026,3 +10026,35 @@ $ wait
   绝对隔离时给两边设不同的 `STRATUM_TEST_DOMAIN_BASE`。已写进头文件。
 - 新增测试若继续手写固定路径会重新引入问题；C++ 侧没有编译期强制手段，
   **CI 里"两份全量同时跑"是唯一能兜住它的回归方式**。
+
+## 2026-10-18 16:3x — 真问题：Recorder 的 write_batch_size 未校验（卡死 / 崩溃）
+
+### 触发条件与复现
+
+`RecorderConfig.write_batch_size` 直接进 `WriterLoop`，没有任何校验：
+
+1. **= 0**：`while (!queue_.empty() && batch.size() < 0)` 永不成立 → 队列永不消费。
+   mock 复现（MemoryEngine + MockBackend，推 1 条样本）：
+   ```
+   Start rc=OK
+   received=1 recorded=0 queue=1
+   Stop did not return within 3s -> writer 线程卡死
+   ```
+2. **超大值**：CLI `--write-batch-size -1` 经 `strtoul` 变 `ULONG_MAX`，
+   `batch.reserve(SIZE_MAX)` → `std::length_error`，线程内无人捕获：
+   ```
+   terminate called after throwing an instance of 'std::length_error'
+     what():  vector::reserve
+   rc=134
+   ```
+   而 `0` / `abc` 在 CLI 上**静默接受**（0 返回 0，无数据时不报错；有数据则卡死）。
+
+### 修法
+
+- `Recorder::Start`：`write_batch_size` 必须在 `[1, 1000000]`，否则
+  `InvalidArgument`（状态机保持 kIdle，可重试）。
+- `cmd_record`：`--write-batch-size` 严格 `strtoull`（endptr + ERANGE + 范围），
+  非法值走 USAGE(2)，且**在创建任何目录之前**返回。
+- 测试：`test_recorder_queue.RejectsInvalidWriteBatchSize`（0 与 SIZE_MAX 被拒，
+  合法值仍能启动）；`test_record_cli_errors` 5 个非法值断言退出码 2 且目录未创建。
+
