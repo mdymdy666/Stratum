@@ -9940,7 +9940,7 @@ standalone/config:  独立可构建，91 断言全过
 * 输出：JSON（契约字段）+ `--format table` 人类可读 + `--report <文件>` 另存 JSON。
   偏差警告走 stderr（stdout 保持纯净）。
 
-### 三、测试（`tests/integration/test_merge.cc`，10 个用例，ctest 65 → 75）
+### 三、测试（`tests/integration/test_merge.cc`，11 个用例 = 10 个场景 + 1 个随机不变量）
 
 | 用例 | 结果 |
 |---|---|
@@ -9953,7 +9953,8 @@ standalone/config:  独立可构建，91 断言全过
 | TenSources（10×100=1000，覆盖度 10，产物可查） | ✅ |
 | SameTimestampDifferentPayload（conflicts=5，两条都留，退出 5） | ✅ |
 | CliErrors（NOTFOUND 8 / EXISTS 3 / USAGE 2 ×5 / `--overwrite` 重建 / 失败不建目标） | ✅ |
-| TableMatchesJson（table 有人类可读文本 + 说明；条数与 json 一致） | ✅ |
+| TableMatchesJson（table 有人类可读文本 + 说明；`--report` 落盘仍是合法 JSON） | ✅ |
+| RandomInvariant（固定种子 3×20 条、键空间 8×5 → 22 条跨源重复；不变量：保留 = Σ 源序号最小者的条数） | ✅ |
 
 `ctest -R test_merge` 在 `/UserData/CodexWorkSpace/Stratum-merge/build` 上通过（1.53s）。
 

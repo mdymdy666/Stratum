@@ -24,12 +24,15 @@
 // 比真实 record + DDS 快一个数量级，且能精确控制时间戳与 payload ——
 // 这正是合并测试需要的（时钟偏差、同刻不同内容都是构造出来的）。
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <random>
 #include <string>
 #include <unistd.h>
 #include <utility>
@@ -605,6 +608,73 @@ STRATUM_TEST(MergeFormat, TableMatchesJson) {
   STRATUM_CHECK_TRUE(HasSub(report, "合并不判断数据对错"));
 
   std::printf("      [双输出] table 含表格文本与说明；json 含 note；--report 落盘；条数一致\n");
+}
+
+
+// ===========================================================================
+// 十一、随机（固定种子，可复现）：不变量 —— 每个 (ts,payload) 保留"单源最大条数"
+// ===========================================================================
+//
+// 随机构造 3 个源，事件的时间戳与 payload 从固定集合里随机取，
+// 于是**天然产生**三类情况：
+//   · 跨源完全相同 → 去重
+//   · 同源内相同 → 保留
+//   · 同刻不同内容 → 冲突（保留）
+//
+// 不变量（可精确计算，不依赖实现的内部结构）：
+//     key = (合并后时间戳, payload)。同 key 的多条来自不同源时，保留
+//     **源参数顺序最靠前**的那个源的全部记录（同刻 → 排序只差源序号），
+//     其余源的同 key 记录被丢弃。所以：
+//         merged.events = Σ_key 条数(key, 源序号最小的那个源)
+//         merged.events + duplicates_removed = 三个源的条数之和
+//
+// 固定种子保证失败可复现；换种子只是换一组随机输入，断言不变。
+
+STRATUM_TEST(MergeRandom, InvariantMaxPerSource) {
+  const TimestampNs base = 1700000000000000000ull;
+  std::mt19937 rng(20261018u);
+  std::map<std::string, std::map<uint32_t, int>> per_key;   // key -> 源 -> 条数
+  std::string cmd = kCli + " session merge";
+  std::string err;
+
+  for (int s = 0; s < 3; ++s) {
+    TopicSpec t;
+    t.name = "rand/t";
+    for (int i = 0; i < 20; ++i) {
+      // 键空间刻意做小（8 个时刻 × 5 种内容 = 40 个 key / 60 条事件）：
+      // 这样随机输入**必然**产生跨源重复与同源重复，去重规则才会被真正压到。
+      const TimestampNs ts = base + (rng() % 8) * 1000000ull;
+      const std::string p = "p" + std::to_string(rng() % 5);
+      t.events.push_back(EventSpec{ts, p});
+      per_key[std::to_string(ts) + "|" + p][static_cast<uint32_t>(s)] += 1;
+    }
+    const std::string d = TempDir("rand_" + std::to_string(s));
+    STRATUM_CHECK_TRUE(MakeSession(d, {t}, &err));
+    cmd += " " + d;
+  }
+
+  uint64_t expected = 0;
+  for (const auto& kv : per_key) {
+    // std::map<uint32_t,int> 按源序号升序：begin() 就是"参数顺序最靠前的源"
+    auto first = kv.second.begin();
+    int count = (first == kv.second.end()) ? 0 : first->second;
+    expected += static_cast<uint64_t>(count);
+  }
+
+  const std::string dst = TempDir("rand_dst") + "/merged";
+  cmd += " --to " + dst;
+  const CliResult m = RunCliJson(cmd);
+  // 随机数据里同刻不同内容会出现 → 允许 5（PARTIAL），但绝不允许其它错误码
+  STRATUM_CHECK_TRUE(m.code == 0 || m.code == 5);
+  STRATUM_CHECK_EQ(PickInObject(m.output, "merged", "events"),
+                   static_cast<long long>(expected));
+  STRATUM_CHECK_EQ(PickInArray(m.output, "sources", 0, "events"), 20LL);
+  STRATUM_CHECK_EQ(PickInArray(m.output, "sources", 2, "events"), 20LL);
+  const long long dup = PickInObject(m.output, "dedupe", "duplicates_removed");
+  STRATUM_CHECK_EQ(static_cast<long long>(expected) + dup, 60LL);
+
+  std::printf("      [随机] 3×20 条：保留 %llu 条（源序号最小的那个源），去重 %lld 条，合计 60\n",
+              static_cast<unsigned long long>(expected), dup);
 }
 
 STRATUM_TEST_MAIN()

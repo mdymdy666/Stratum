@@ -245,6 +245,11 @@ source 缺失时才退化为 reception。所以 A、B 两份录制里同一条�
 （重复发布、样本重传）。删掉它就是篡改数据。所以去重集合只在
 **不同源之间**生效：判定时看"这条记录是否已由**另一个**源写过"。
 
+**保留哪一条**：同一个 key 的两份来自不同源时，保留**源参数顺序最靠前**的那条
+（key 含时间戳，所以两份的时刻相同，只差源序号）。理由：确定、可复现 ——
+同样的命令跑两次不能换一份数据；参数顺序本身就是人给出的优先级。
+报告里 `sources[i].duplicates` 直接显示"第 i 个源被去掉了多少条"。
+
 ### 冲突计数（同名同刻不同内容）
 
 ```
@@ -482,7 +487,7 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 
 ---
 
-## 九、测试计划（进 ctest，10 个用例，65 → 75）
+## 九、测试计划（进 ctest，11 个用例 = 10 个场景 + 1 个随机不变量，65 → 75）
 
 | 用例 | 验证什么 |
 |---|---|
@@ -495,7 +500,8 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 | **TenSources** | 10 个源 → 条数 = 1000、每源 `contributed` 正确、topic 覆盖度 10、产物可查 |
 | **SameTimestampDifferentPayload** | 同名同刻不同 payload → `conflicts` 精确、两条都保留、退出码 5（PARTIAL） |
 | **CliErrors** | 源不存在→8 且不创建目标、目标已存在→3、`--overwrite` 重建、参数不足/缺 `--to`/目标==源/非法选项→2 |
-| **TableMatchesJson** | `--format table` 有人类可读文本（含说明）且与 JSON 条数一致 |
+| **TableMatchesJson** | `--format table` 有人类可读文本（含说明）且与 JSON 条数一致；`--report` 落盘的报告仍是合法契约 JSON |
+| **RandomInvariant** | 固定种子随机 3×20 条（键空间 8×5，必产重复）→ 不变量：`merged.events = Σ_key 源序号最小的那个源的条数`，且 `保留 + 去重 = 总数` |
 
 **最有价值的三个**：`BroadcastDedup`（去重规则是否成立）、`SameSourceNotDeduped`
 （去重不能越界删源数据）、`ClockSkewOffset`（对齐规则的失效边界是否**可观测**）——
