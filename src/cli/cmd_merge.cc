@@ -236,8 +236,11 @@ bool ParseSignedDuration(const std::string& s, int64_t* out) {
   if (v.empty()) return false;
   uint64_t magnitude = 0;
   if (!ParseDurationNs(v, &magnitude)) return false;
-  // 防止 int64 溢出（离 292 年还有很远的量级）
-  const uint64_t kMax = 9000000000000000000ull;
+  // 上限 1e18 ns（约 31.7 年）。
+  // 【为什么不是 int64 的极限 9.2e18】偏移要和 source 时间戳（~1.8e18）相加；
+  // 若允许到 9e18，`base + offset` 会溢出 int64（UB），不是"算错"而是未定义行为。
+  // 1e18 的量级远超任何真实钟差，同时保证相加后仍在 int64 内。
+  const uint64_t kMax = 1000000000000000000ull;
   if (magnitude > kMax) return false;
   *out = negative ? -static_cast<int64_t>(magnitude) : static_cast<int64_t>(magnitude);
   return true;
@@ -1027,6 +1030,17 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
   }
 
   const std::string target_canon = Canonical(to);
+
+  // 【安全阀】根目录必须拒绝。
+  // 下面的"目标是源的祖先"检查靠 `src_canon[target_canon.size()] == '/'` 判断，
+  // 对 target="/" 不成立（源路径第 2 个字符不是 '/'），于是
+  // `--to / --overwrite` 会走到 fs::remove_all("/") —— 不可接受。
+  if (target_canon == "/" || target_canon.empty()) {
+    return Fail(kUsage, "目标不能是根目录: " + to,
+                "合并会在目标位置建会话；--overwrite 时还会先清空目标",
+                "换一个具体目录，例如 --to /data/merged");
+  }
+
   for (const auto& p : positional) {
     if (Canonical(p) == target_canon) {
       return Fail(kUsage, "目标会话不能是源之一: " + p,

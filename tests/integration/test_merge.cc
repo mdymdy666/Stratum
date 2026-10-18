@@ -632,7 +632,12 @@ STRATUM_TEST(MergeErrors, CliErrors) {
                                    TempDir("err_d8") + "/m --offset nope");
   STRATUM_CHECK_EQ(r8.code, 2);
 
-  std::printf("      [错误] NOTFOUND×1 / EXISTS×1 / USAGE×5，且失败不创建目标\n");
+  // 8) 目标是根目录 → USAGE(2)（安全阀：否则 --overwrite 会 remove_all("/")）
+  //    这里刻意不加 --overwrite：即使安全阀失效，也只会走到 EXISTS(3)，不会删任何东西。
+  const CliResult r9 = RunCliTable(kCli + " session merge " + src + " --to /");
+  STRATUM_CHECK_EQ(r9.code, 2);
+
+  std::printf("      [错误] NOTFOUND×1 / EXISTS×1 / USAGE×6，且失败不创建目标\n");
 }
 
 // ===========================================================================

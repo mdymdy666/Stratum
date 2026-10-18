@@ -10004,6 +10004,11 @@ worktree 并提交。真实路径 `/UserData/CodexWorkSpace/Stratum-merge` 一�
   `dedupe.duplicates_removed`，不要看退出码。
 * 按评审确认写进 docs/16 §三：**`merge` 不提供 `--probe-prefix`** —— 合并不改 topic 名，
   给一个"改名"选项等于让已否决的路径从后门回来，还会破坏 `_probe.` 分类。
+* **两处安全加固**（自查发现，均有测试）：
+  ① `--to /` 必须拒绝 —— "目标是源祖先"的检查依赖 `src[target.size()] == '/'`，
+     对根目录不成立，`--to / --overwrite` 会走到 `fs::remove_all("/")`；
+  ② `--offset` 上限从 9e18 收到 1e18 ns —— 偏移要和 ~1.8e18 的 source 时间戳相加，
+     允许到 9e18 会让 `base + offset` 溢出 int64（UB，不是"算错"而是未定义行为）。
 
 
 **未完成（明确列出）**
