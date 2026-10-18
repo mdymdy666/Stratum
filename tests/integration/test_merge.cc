@@ -585,6 +585,14 @@ STRATUM_TEST(MergeFormat, TableMatchesJson) {
   STRATUM_CHECK_TRUE(HasSub(t.output, "绝对时间轴"));
   STRATUM_CHECK_TRUE(HasSub(t.output, "20 条"));
   STRATUM_CHECK_TRUE(HasSub(t.output, "说明: 合并不判断数据对错"));
+  // ★ 人类可读路径不是"顺手打印"，它也被锁住：该有的段落一个不能少
+  STRATUM_CHECK_TRUE(HasSub(t.output, "来源（1）"));
+  STRATUM_CHECK_TRUE(HasSub(t.output, "话题（1）"));
+  STRATUM_CHECK_TRUE(HasSub(t.output, "时钟偏差观测"));
+  STRATUM_CHECK_TRUE(HasSub(t.output, "冲突: 0 处"));
+  STRATUM_CHECK_TRUE(HasSub(t.output, "偏移 +0.00ms"));
+  // --format 真的生效了：table 输出里不能混进 JSON
+  STRATUM_CHECK_TRUE(!HasSub(t.output, "\"schema_version\""));
 
   const CliResult j = RunCliJson(kCli + " session merge " + src + " --to " + dst_j);
   STRATUM_CHECK_EQ(j.code, 0);
@@ -607,12 +615,28 @@ STRATUM_TEST(MergeFormat, TableMatchesJson) {
   // note 在文件里也必须存在（不只是 stdout）
   STRATUM_CHECK_TRUE(HasSub(report, "合并不判断数据对错"));
 
-  std::printf("      [双输出] table 含表格文本与说明；json 含 note；--report 落盘；条数一致\n");
+  // --help：选项说明必须可达（--to/--dedupe/--offset/--report + 退出码 + 文档指向）
+  const CliResult h = RunCliTable(kCli + " session merge --help");
+  STRATUM_CHECK_EQ(h.code, 0);
+  STRATUM_CHECK_TRUE(HasSub(h.output, "--to"));
+  STRATUM_CHECK_TRUE(HasSub(h.output, "--dedupe"));
+  STRATUM_CHECK_TRUE(HasSub(h.output, "--offset"));
+  STRATUM_CHECK_TRUE(HasSub(h.output, "--report"));
+  STRATUM_CHECK_TRUE(HasSub(h.output, "退出码"));
+  STRATUM_CHECK_TRUE(HasSub(h.output, "docs/16-session-merge.md"));
+
+  // 全局 --help 里也要能查到 merge 的选项（不只子命令 help）
+  const CliResult gh = RunCliTable(kCli + " --help");
+  STRATUM_CHECK_EQ(gh.code, 0);
+  STRATUM_CHECK_TRUE(HasSub(gh.output, "session merge 的选项"));
+  STRATUM_CHECK_TRUE(HasSub(gh.output, "--offset <会话>=<±时长>"));
+
+  std::printf("      [双输出] table 段落齐全且不混 JSON；json 含 note；--report 落盘；--help 可达\n");
 }
 
 
 // ===========================================================================
-// 十一、随机（固定种子，可复现）：不变量 —— 每个 (ts,payload) 保留"单源最大条数"
+// 十一、随机（固定种子，可复现）：不变量 —— 每个 (ts,payload) 保留"源序号最小的源"的条数
 // ===========================================================================
 //
 // 随机构造 3 个源，事件的时间戳与 payload 从固定集合里随机取，

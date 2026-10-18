@@ -864,6 +864,31 @@ std::string Canonical(const std::string& path) {
   return ec ? fs::path(path).lexically_normal().string() : p.string();
 }
 
+// 本命令选项多（目标策略/去重/偏移/报告），给一个**子命令级** help。
+// 其他子命令没有 `--help`（选项少，未知选项的报错里已给出可用列表）；
+// 合并的选项组合直接影响结论，值得让人先读一遍再跑。
+void PrintMergeHelp() {
+  std::printf(
+      "用法: stratum [--format table|json] session merge <会话1> [<会话2> ...] --to <目标>\n"
+      "\n"
+      "把多份会话放到同一条时间轴上。设计裁决见 docs/16-session-merge.md\n"
+      "\n"
+      "选项:\n"
+      "  --to <路径>              目标会话（必填）。不存在则新建；已存在且非空 -> 3 EXISTS\n"
+      "  --overwrite              目标非空时先清空（危险操作，必须显式）\n"
+      "  --dedupe content|none    跨源去重策略（默认 content）；none = 全部保留\n"
+      "  --offset <会话>=<+-时长>  给某个源加固定偏移，用于时钟偏差校正（可重复）\n"
+      "                           <会话> 可用完整路径或源标签（目录名）；最小 1ms\n"
+      "  --report <文件>          把合并报告（JSON）另存到文件\n"
+      "  --help, -h               本说明\n"
+      "\n"
+      "退出码: 0 成功 / 5 合并完成但有冲突或可疑时钟偏差 / 8 源不存在 /\n"
+      "        3 目标已存在 / 2 用法错误 / 6 环境不可写 / 1 写入失败\n"
+      "\n"
+      "说明: 合并不判断数据对错，只把多份放在同一时间轴上；\n"
+      "      不修正时间戳、不补齐空洞，冲突与时钟偏差只报不改。\n");
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -879,6 +904,10 @@ int CmdMerge(const std::vector<std::string>& args, GlobalOptions g) {
 
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string& a = args[i];
+    if (a == "--help" || a == "-h") {
+      PrintMergeHelp();
+      return kOk;
+    }
     auto NextValue = [&](const char* opt) -> const std::string* {
       if (i + 1 >= args.size()) {
         Fail(kUsage, std::string(opt) + " 缺少参数值", "", "");

@@ -9940,7 +9940,8 @@ standalone/config:  独立可构建，91 断言全过
 * 输出：JSON（契约字段）+ `--format table` 人类可读 + `--report <文件>` 另存 JSON。
   偏差警告走 stderr（stdout 保持纯净）。
 
-### 三、测试（`tests/integration/test_merge.cc`，11 个用例 = 10 个场景 + 1 个随机不变量）
+### 三、测试（`tests/integration/test_merge.cc`，11 个用例 = 10 个场景 + 1 个随机不变量；
+ctest 65 → **66** —— 一个测试二进制算一个 ctest 条目，之前提交信息里的「→ 75」是错误口径，在此更正）
 
 | 用例 | 结果 |
 |---|---|
@@ -9978,7 +9979,46 @@ worktree 并提交。真实路径 `/UserData/CodexWorkSpace/Stratum-merge` 一�
 我这边：已在本地 `build/tools/` 手工构建（构建产物不入库），并**等主控放行**后再跑全量；
 期间只跑 `test_merge`（用 `$HOME` 下带 pid 的独有目录，不碰 DDS）。
 
-### 五、状态
+### 五、本轮完成 / 未完成 / 已知局限
+
+**完成**
+
+* `docs/16-session-merge.md`：三个裁决 + 输出契约 + 退出码 + 三条局限 + 50ms 数字例子
+  + payload 1 字节风险 + 实现口径（§十一）+ 保留哪一条的规则
+* `src/cli/cmd_merge.cc`（+ session 分派、CMake、main help）：源预检 / 目标策略 /
+  绝对时间轴 / 显式 offset / 跨源去重 / 冲突计数 / 偏差观测 / table+json / `--report` /
+  `--help`（子命令级）
+* `tests/integration/test_merge.cc`：11 个用例（10 场景 + 1 随机不变量）；ctest 65 → 66
+* 既有能力回归：排除 3 个需要独占的 DDS/外部工具 suite 后 **63/63 全绿**；
+  随后独占跑全量：**66/66 全绿**（214s）
+* 顺手修掉一个新测试抓到的老问题：`stratum --help` 原先返回 2（与「没给子命令」共用
+  分支）；显式请求帮助应当是成功（0）。只改 main.cc 的两行分支，带子命令的
+  `--help` 与无参数行为不变。
+
+**未完成（明确列出）**
+
+* **不做近似时间去重**（没有 `--dup-window`）：只判"完全同一时刻"；有偏差先 `--offset` 校正
+* **不做增量合并**：目标已存在默认拒绝，只能 `--overwrite` 全量重建
+* **不做相对重定基**：那是 `diff` 的领域；merge 要保留绝对时刻
+* **不按来源改 topic 名、不保留逐事件来源**（`Event` 没有来源字段）
+* **`--offset` 最小粒度 1ms**（`ParseDurationNs` 支持 ms/s/m/h/d/w，不支持 ns/us）
+* **不做 CDR 剥离 / 模糊 payload 比对 / 自动时钟校正 / "哪个源更可信"的判断**
+
+**合并不能做什么（用户视角的硬边界）**
+
+1. **不能自动修时间轴**：两个发布端钟不同源时，跨源先后/间隔按原样拼接；
+   错多少就错多少，只能用 `--offset` 校正，且校正量必须有来源（PTP/NTP/`clock_skew` 证据）。
+2. **不能反推源的质量**：合并会话的 quality 是重新累积的（丢弃 0、倒退 0），
+   `verify 合并产物` 只能评价产物，不能说明任何源是完整的。
+3. **不能补齐空洞**：两源都没有数据的时段，合并后仍是空洞，也不会插"缺失"记录。
+4. **不能判断数据对错 / 谁权威**：同名同刻不同内容 → 两条都留，只计数。
+5. **不能保留逐事件来源**：只保留每源的 `contributed` / `duplicates` / `offset`。
+6. **不能在源正被写入时安全合并**：读的是某一时刻的快照，并发写可能读到半截。
+7. **大内存**：全量读入后按时间排序（峰值 ≈ 各源 payload 总量），百万级会话需数 GB；
+   不做外部排序 —— 这条已写进 docs/16 §七。
+8. **`--dedupe none` 的条数是"接收次数"**，不是"真实消息数"。
+
+### 六、状态
 
 ```
 worktree: /UserData/CodexWorkSpace/Stratum-merge（分支 feature/session-merge）

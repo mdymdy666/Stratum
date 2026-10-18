@@ -56,6 +56,14 @@ void PrintHelp() {
       "  config explain  <文件>          逐条解释配置的实际效果\n"
       "  config lock/unlock/status <文件> 配置文件编辑锁\n"
       "\n"
+      "session merge 的选项（`stratum session merge --help` 有同样说明）:\n"
+      "  --to <目标>                     目标会话（必填）；已存在且非空 -> 3 EXISTS\n"
+      "  --overwrite                     目标非空时先清空\n"
+      "  --dedupe content|none           跨源去重（默认 content）\n"
+      "  --offset <会话>=<±时长>         固定偏移校正（可重复，最小 1ms）\n"
+      "  --report <文件>                 合并报告另存为 JSON\n"
+      "  设计裁决（时钟/同名 topic/去重）见 docs/16-session-merge.md\n"
+      "\n"
       "record 的选项:\n"
       "  --dir <目录>                    会话目录（必填）\n"
       "  --domain <n>                    DDS 域号\n"
@@ -220,7 +228,13 @@ int main(int argc, char** argv) {
   }
 
   if (want_version) { PrintVersion(); return kOk; }
-  if (want_help || rest.empty()) { PrintHelp(); return rest.empty() ? kUsage : kOk; }
+  // 【两种情况的退出码必须不同】
+  //   显式 --help：用户要的就是这份说明 → 成功（0）
+  //   不带任何参数：缺子命令 → 用法错误（2）
+  // 原先两者共用 `rest.empty() ? kUsage : kOk`，于是 `stratum --help` 也返回 2，
+  // 脚本里 `stratum --help >/dev/null || exit` 会误判为失败。
+  if (want_help) { PrintHelp(); return kOk; }
+  if (rest.empty()) { PrintHelp(); return kUsage; }
 
   // 日志必须在子命令之前初始化（否则子命令里的日志用的是默认配置）
   InitLogging(g);
