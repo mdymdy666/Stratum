@@ -26,6 +26,7 @@
 
 #include "stratum/storage/lsm_v2/stratum_db.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage::lsm_v2;
@@ -60,7 +61,7 @@ STRATUM_TEST(LsmV2Random, A_FiftyThousandChaoticEventsMatchShadow) {
   constexpr uint64_t kSeed = 20261020;
   ctx.param_desc = "seed=" + std::to_string(kSeed);
 
-  const std::string dir = "/tmp/stratum_v2_rand";
+  const std::string dir = std::string("/tmp/stratum_v2_rand_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   StratumDB* db = nullptr;
@@ -173,7 +174,7 @@ STRATUM_TEST(LsmV2Random, C_RestartAndAppendNoOverwrite) {
   constexpr uint64_t kSeed = 20261021;
   ctx.param_desc = "seed=" + std::to_string(kSeed);
 
-  const std::string dir = "/tmp/stratum_v2_restart";
+  const std::string dir = std::string("/tmp/stratum_v2_restart_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   std::mt19937_64 rng(kSeed);
@@ -244,7 +245,7 @@ STRATUM_TEST(LsmV2Random, C_RestartAndAppendNoOverwrite) {
 // D：10 万条批量写入吞吐与完整性（触发多次 compaction）
 // ---------------------------------------------------------------------------
 STRATUM_TEST(LsmV2Random, D_HundredThousandBulkThroughput) {
-  const std::string dir = "/tmp/stratum_v2_bulk";
+  const std::string dir = std::string("/tmp/stratum_v2_bulk_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   constexpr int kTotal = 100000;

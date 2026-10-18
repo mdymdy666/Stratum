@@ -16,6 +16,7 @@
 #include "stratum/storage/memory/memory_engine.h"
 #include "mock_backend.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage;
@@ -112,7 +113,7 @@ STRATUM_TEST(N1, DropsFeedQualityStatsV1) {
 }
 
 STRATUM_TEST(N1, DropsFeedQualityStatsV2) {
-  const std::string dir = "/tmp/stratum_n1_v2";
+  const std::string dir = std::string("/tmp/stratum_n1_v2_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   TimelineImplV2 timeline;

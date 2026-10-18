@@ -30,6 +30,7 @@
 #include "stratum/storage/lsm/lsm_engine.h"
 #include "stratum/storage/memory/memory_engine.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage;
@@ -122,7 +123,7 @@ STRATUM_TEST(Stress, BulkWriteHundredThousand) {
 // LSM 引擎压力：验证刷盘与 Compaction 下不丢数据
 // ---------------------------------------------------------------------------
 STRATUM_TEST(Stress, LsmHandlesFlushAndCompaction) {
-  const std::string dir = "/tmp/stratum_stress_lsm";
+  const std::string dir = std::string("/tmp/stratum_stress_lsm_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略
   }

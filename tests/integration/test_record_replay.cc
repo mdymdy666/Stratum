@@ -22,6 +22,7 @@
 #include "stratum/storage/memory/memory_engine.h"
 #include "mock_backend.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage;
@@ -157,7 +158,7 @@ STRATUM_TEST(EndToEnd, RecordThenReplayAllMatches) {
 }
 
 STRATUM_TEST(EndToEnd, RecordReplayOnLsmEngineAcrossReopen) {
-  const std::string dir = "/tmp/stratum_e2e_lsm";
+  const std::string dir = std::string("/tmp/stratum_e2e_lsm_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略
   }

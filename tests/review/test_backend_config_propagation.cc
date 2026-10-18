@@ -27,6 +27,7 @@
 #include "stratum/core/timeline_impl_v2.h"
 #include "mock_backend.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::testing;
@@ -39,7 +40,7 @@ constexpr TimestampNs kBaseTs = 1700000000000000000ULL;
 // 录制端：RecorderConfig::backend 必须原样交给 CreateSource
 // ---------------------------------------------------------------------------
 STRATUM_TEST(BackendConfigPropagation, RecorderForwardsConfigToBackend) {
-  const std::string dir = "/tmp/stratum_backend_cfg_rec";
+  const std::string dir = std::string("/tmp/stratum_backend_cfg_rec_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   TimelineImplV2 timeline;
@@ -71,7 +72,7 @@ STRATUM_TEST(BackendConfigPropagation, RecorderForwardsConfigToBackend) {
 // 回放端：PlayerConfig::backend 必须原样交给 CreateSink
 // ---------------------------------------------------------------------------
 STRATUM_TEST(BackendConfigPropagation, PlayerForwardsConfigToBackend) {
-  const std::string dir = "/tmp/stratum_backend_cfg_play";
+  const std::string dir = std::string("/tmp/stratum_backend_cfg_play_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   // 先写一条数据，保证 Play 有内容可走完整流程
@@ -128,7 +129,7 @@ STRATUM_TEST(BackendConfigPropagation, PlayerForwardsConfigToBackend) {
 // 默认行为不变：不显式设置时 domain 仍为 0（不引入意外副作用）
 // ---------------------------------------------------------------------------
 STRATUM_TEST(BackendConfigPropagation, DefaultsRemainZero) {
-  const std::string dir = "/tmp/stratum_backend_cfg_default";
+  const std::string dir = std::string("/tmp/stratum_backend_cfg_default_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   TimelineImplV2 timeline;

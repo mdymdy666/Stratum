@@ -31,6 +31,7 @@
 #include "stratum/config/level_codec.hpp"
 #include "stratum/log.hpp"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 namespace fs = std::filesystem;
 
@@ -45,7 +46,7 @@ double MsSince(Clock::time_point t0) {
 }
 
 std::string TempDir(const char* tag) {
-  const std::string d = std::string("/tmp/stratum_port_") + tag;
+  const std::string d = std::string("/tmp/stratum_port_") + tag + "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(d, ec);
   fs::create_directories(d, ec);

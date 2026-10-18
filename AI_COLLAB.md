@@ -9986,3 +9986,43 @@ standalone/config:  独立可构建，91 断言全过
 - 其余测试仍有固定 `/tmp/stratum_*` 路径（lsm_v2_* / random / review 等），
   两个 worktree 同时跑时仍可能撞车（LevelDB 有 LOCK，撞上就是硬失败）。
   已在后续小节继续处理。
+
+## 2026-10-18 16:0x — 测试隔离统一加固（30 个测试文件，已实测双跑全绿）
+
+### 做了什么
+
+- 新增 `tests/support/test_isolation.h`：
+  `UniqueSuffix()` = `<pid>_<进程内计数>`；`UniqueDir(prefix, tag)`；
+  `TestDomain(slot)` = `base + (pid % 20) * 8 + slot`，base 默认 **60**
+  （刻意避开旧版本测试用过的 33~37 / 43~47，使"新测试 vs 另一个 worktree 的旧测试"
+  不会撞域），可用 `STRATUM_TEST_DOMAIN_BASE` 覆盖。
+- 30 个测试文件的固定路径全部改为进程唯一（`/dev/shm/stratum_*`、`/tmp/stratum_*`），
+  `test_stdout_purity` 的 stdout/stderr 重定向文件也改为进程唯一。
+- 未改（有意）：`test_probe_cli_errors` 用的是"故意不存在"的路径，两个进程都不创建；
+  `test_diff` 的 `/tmp/absent_<pid>_*` 本来就用 pid。
+
+### 证据（实测命令与输出）
+
+```
+$ ctest --test-dir build -j1          # 串行，确认没改坏
+100% tests passed, 0 tests failed out of 67
+```
+
+```
+$ # 同时起两份全量 ctest（路径/进程名/domain 规则完全相同，比两个 worktree 更严格）
+$ ctest --test-dir build -j4 > full_a.log 2>&1 &
+$ ctest --test-dir build -j4 > full_b.log 2>&1 &
+$ wait
+#1: 100% tests passed, 0 tests failed out of 67
+#2: 100% tests passed, 0 tests failed out of 67
+```
+
+另外单独验证了两个 DDS 重型用例的并发：
+两个 `test_cli_probe` 同时跑各 14/14；两个 `test_verify_business` 同时跑各 5/5。
+
+### 已知限制
+
+- `TestDomain` 用 `pid % 20`，两个进程 pid 差 20 的倍数时仍可能同域（约 5%）；
+  绝对隔离时给两边设不同的 `STRATUM_TEST_DOMAIN_BASE`。已写进头文件。
+- 新增测试若继续手写固定路径会重新引入问题；C++ 侧没有编译期强制手段，
+  **CI 里"两份全量同时跑"是唯一能兜住它的回归方式**。

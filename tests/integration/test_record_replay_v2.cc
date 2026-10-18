@@ -25,6 +25,7 @@
 #include "stratum/core/timeline_impl_v2.h"
 #include "mock_backend.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::testing;
@@ -121,7 +122,7 @@ void SortSamples(std::vector<protocol::ReceivedSample>* v) {
 // 端到端：21,000 条录制 → 回放 → 逐条比对（v2 后端）
 // ---------------------------------------------------------------------------
 STRATUM_TEST(EndToEndV2, RecordThenReplayAllMatches) {
-  const std::string dir = "/tmp/stratum_e2e_v2";
+  const std::string dir = std::string("/tmp/stratum_e2e_v2_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   TimelineImplV2 timeline;
@@ -168,7 +169,7 @@ STRATUM_TEST(EndToEndV2, RecordThenReplayAllMatches) {
 // 跨重启：录制 → 关闭 → 重开 → 回放逐条比对（LSMengine 持久化）
 // ---------------------------------------------------------------------------
 STRATUM_TEST(EndToEndV2, RecordReplayAcrossRestart) {
-  const std::string dir = "/tmp/stratum_e2e_v2b";
+  const std::string dir = std::string("/tmp/stratum_e2e_v2b_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   const auto samples = MakeSamples(5000);  // 15000 条
@@ -214,7 +215,7 @@ STRATUM_TEST(EndToEndV2, RecordReplayAcrossRestart) {
 // Query 接口跑在 v2 上
 // ---------------------------------------------------------------------------
 STRATUM_TEST(EndToEndV2, QueryWorksOnV2) {
-  const std::string dir = "/tmp/stratum_e2e_v2c";
+  const std::string dir = std::string("/tmp/stratum_e2e_v2c_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   TimelineImplV2 timeline;

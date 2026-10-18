@@ -5,6 +5,7 @@
 
 #include "stratum/storage/lsm_v2/stratum_db.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage::lsm_v2;
@@ -14,7 +15,7 @@ constexpr uint64_t kBaseTs = 1700000000000000000ULL;
 }
 
 STRATUM_TEST(LsmV2, AppendQueryRange) {
-  const std::string dir = "/tmp/stratum_v2_basic";
+  const std::string dir = std::string("/tmp/stratum_v2_basic_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
   if (system(("mkdir -p " + dir).c_str()) != 0) {}
 

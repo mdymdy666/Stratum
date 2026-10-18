@@ -32,6 +32,7 @@
 #include "stratum/storage/lsm/lsm_engine.h"
 #include "stratum/storage/lsm/memtable.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage;
@@ -91,7 +92,7 @@ uint64_t FileSize(const std::string& path) {
 // 修复前：Open 返回 OK，WAL 被 O_TRUNC 清空，数据永久丢失。
 // ---------------------------------------------------------------------------
 STRATUM_TEST(WalCorruption, H2_CorruptedWalIsReportedNotTruncated) {
-  const std::string dir = "/tmp/stratum_wal_corrupt";
+  const std::string dir = std::string("/tmp/stratum_wal_corrupt_") + UniqueSuffix();
   const std::string wal_path = dir + "/wal.log";
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略
@@ -150,7 +151,7 @@ STRATUM_TEST(WalCorruption, H2_CorruptedWalIsReportedNotTruncated) {
 // 不能因此让数据库打不开。
 // ---------------------------------------------------------------------------
 STRATUM_TEST(WalCorruption, TruncatedTailIsNormalEofNotCorruption) {
-  const std::string dir = "/tmp/stratum_wal_truncate";
+  const std::string dir = std::string("/tmp/stratum_wal_truncate_") + UniqueSuffix();
   const std::string wal_path = dir + "/wal.log";
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略
@@ -207,7 +208,7 @@ STRATUM_TEST(WalCorruption, TruncatedTailIsNormalEofNotCorruption) {
 // 早期自创格式没有分片概念，大 payload 无法安全处理。
 // ---------------------------------------------------------------------------
 STRATUM_TEST(WalCorruption, LargeRecordSpanningBlocksSurvivesReplay) {
-  const std::string dir = "/tmp/stratum_wal_large";
+  const std::string dir = std::string("/tmp/stratum_wal_large_") + UniqueSuffix();
   const std::string wal_path = dir + "/wal.log";
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略

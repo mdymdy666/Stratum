@@ -78,7 +78,9 @@ int TestDomain(int slot) {
   static const int base = []() {
     const char* env = std::getenv("STRATUM_TEST_DOMAIN_BASE");
     if (env != nullptr && env[0] != '\0') return std::atoi(env);
-    return 43;
+    // 60 刻意避开旧版本测试用过的 33~37 / 43~47：另一个 worktree 可能
+    // 还在跑旧测试（固定 domain），换基址后两者不会撞域。
+    return 60;
   }();
   const int pid_offset =
       static_cast<int>(static_cast<unsigned>(::getpid()) % 20u);

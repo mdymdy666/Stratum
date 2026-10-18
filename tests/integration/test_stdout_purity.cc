@@ -30,6 +30,7 @@
 
 #include "stratum/core/timeline_impl_v2.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 namespace fs = std::filesystem;
 using namespace stratum;
@@ -51,7 +52,12 @@ struct SplitResult {
 // 分开捕获 stdout 与 stderr —— 这正是本套件要验证的东西，所以不能用 2>&1
 SplitResult RunSplit(const std::string& cmd) {
   SplitResult r;
-  const std::string full = cmd + " > /tmp/_purity_out.txt 2> /tmp/_purity_err.txt";
+  // 【并发隔离】重定向文件也必须进程唯一，否则两份测试同时跑会互相覆盖
+  static const std::string out_path =
+      std::string("/tmp/_purity_out_") + UniqueSuffix() + ".txt";
+  static const std::string err_path =
+      std::string("/tmp/_purity_err_") + UniqueSuffix() + ".txt";
+  const std::string full = cmd + " > " + out_path + " 2> " + err_path;
   const int rc = std::system(full.c_str());
   r.code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
 
@@ -65,16 +71,16 @@ SplitResult RunSplit(const std::string& cmd) {
     std::fclose(f);
     return s;
   };
-  r.out = ReadAll("/tmp/_purity_out.txt");
-  r.err = ReadAll("/tmp/_purity_err.txt");
-  std::remove("/tmp/_purity_out.txt");
-  std::remove("/tmp/_purity_err.txt");
+  r.out = ReadAll(out_path.c_str());
+  r.err = ReadAll(err_path.c_str());
+  std::remove(out_path.c_str());
+  std::remove(err_path.c_str());
   return r;
 }
 
 std::string TempDir(const char* tag) {
   const char* home = std::getenv("HOME");
-  const std::string d = std::string(home ? home : ".") + "/stratum_pu_" + tag;
+  const std::string d = std::string(home ? home : ".") + "/stratum_pu_" + tag + "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(d, ec);
   fs::create_directories(d, ec);

@@ -26,6 +26,7 @@
 #include "stratum/storage/lsm/lsm_engine.h"
 #include "stratum/storage/memory/memory_engine.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage;
@@ -303,7 +304,7 @@ STRATUM_TEST(Random, TwoEnginesAgreeUnderRandomOps) {
   constexpr uint64_t kSeed = 20261011;
   ctx.param_desc = "seed=" + std::to_string(kSeed);
 
-  const std::string dir = "/tmp/stratum_random_parity";
+  const std::string dir = std::string("/tmp/stratum_random_parity_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略
   }

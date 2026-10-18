@@ -33,6 +33,7 @@
 #include "stratum/core/timeline_impl_v2.h"
 #include "mock_backend.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::testing;
@@ -75,7 +76,7 @@ void RecordAndClose(const std::string& dir) {
 // 元数据往返：重开后 type_name 必须还在
 // ---------------------------------------------------------------------------
 STRATUM_TEST(TopicMetaV2, TypeNameSurvivesReopen) {
-  const std::string dir = "/tmp/stratum_topicmeta_type_name";
+  const std::string dir = std::string("/tmp/stratum_topicmeta_type_name_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   RecordAndClose(dir);
@@ -110,7 +111,7 @@ STRATUM_TEST(TopicMetaV2, TypeNameSurvivesReopen) {
 // （RtpsWriter/BuildPublication 的输入就是它）
 // ---------------------------------------------------------------------------
 STRATUM_TEST(TopicMetaV2, PlayerPropagatesTypeNameAfterReopen) {
-  const std::string dir = "/tmp/stratum_topicmeta_type_name_play";
+  const std::string dir = std::string("/tmp/stratum_topicmeta_type_name_play_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   RecordAndClose(dir);

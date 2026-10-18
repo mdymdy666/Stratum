@@ -10,6 +10,7 @@
 
 #include "stratum/core/timeline_impl_v2.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 
@@ -18,7 +19,7 @@ constexpr uint64_t kBaseTs = 1700000000000000000ULL;
 }
 
 STRATUM_TEST(TimelineV2, RegisterAppendQuery) {
-  const std::string dir = "/tmp/stratum_tl_v2";
+  const std::string dir = std::string("/tmp/stratum_tl_v2_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   TimelineImplV2 tl;
@@ -102,7 +103,7 @@ STRATUM_TEST(TimelineV2, RegisterAppendQuery) {
 }
 
 STRATUM_TEST(TimelineV2, SameTimestampAndQualityStats) {
-  const std::string dir = "/tmp/stratum_tl_v2b";
+  const std::string dir = std::string("/tmp/stratum_tl_v2b_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   TimelineImplV2 tl;
@@ -150,7 +151,7 @@ STRATUM_TEST(TimelineV2, SameTimestampAndQualityStats) {
 }
 
 STRATUM_TEST(TimelineV2, RestartRestoresTopicsAndStats) {
-  const std::string dir = "/tmp/stratum_tl_v2c";
+  const std::string dir = std::string("/tmp/stratum_tl_v2c_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   {
@@ -197,7 +198,7 @@ STRATUM_TEST(TimelineV2, RestartRestoresTopicsAndStats) {
 }
 
 STRATUM_TEST(TimelineV2, RetentionPointAndPolicy) {
-  const std::string dir = "/tmp/stratum_tl_v2d";
+  const std::string dir = std::string("/tmp/stratum_tl_v2d_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   TimelineImplV2 tl;

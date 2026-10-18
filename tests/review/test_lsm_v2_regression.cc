@@ -5,6 +5,7 @@
 
 #include "stratum/storage/lsm_v2/stratum_db.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage::lsm_v2;
@@ -38,7 +39,7 @@ Status RegisterAndWrite(StratumDB* db, uint32_t* topic, TimestampNs ts,
 //         → LevelDB 覆盖写 → 历史数据静默消失
 // ---------------------------------------------------------------------------
 STRATUM_TEST(LsmV2, P1_SeqCounterSurvivesRestart) {
-  const std::string dir = "/tmp/stratum_v2_p1";
+  const std::string dir = std::string("/tmp/stratum_v2_p1_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   uint32_t topic = 0;
@@ -95,7 +96,7 @@ STRATUM_TEST(LsmV2, P1_SeqCounterSurvivesRestart) {
 // 【P2 验证】未注册 topic 必须被拒绝
 // ---------------------------------------------------------------------------
 STRATUM_TEST(LsmV2, P2_UnregisteredTopicRejected) {
-  const std::string dir = "/tmp/stratum_v2_p2";
+  const std::string dir = std::string("/tmp/stratum_v2_p2_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   StratumDB* db = nullptr;

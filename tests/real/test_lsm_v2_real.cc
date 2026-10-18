@@ -25,6 +25,7 @@
 
 #include "stratum/storage/lsm_v2/stratum_db.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage::lsm_v2;
@@ -80,7 +81,7 @@ std::vector<Event> GenerateStream(uint32_t topic_id, const TopicSpec& spec,
 // 完整业务场景：多话题录制 → 突发回补 → 重启 → 回放比对
 // ---------------------------------------------------------------------------
 STRATUM_TEST(LsmV2Real, E_RoboticDdsRecordingReplayAcrossRestart) {
-  const std::string dir = "/tmp/stratum_v2_real";
+  const std::string dir = std::string("/tmp/stratum_v2_real_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   // 话题规格
@@ -199,7 +200,7 @@ STRATUM_TEST(LsmV2Real, E_RoboticDdsRecordingReplayAcrossRestart) {
 // F：时间点查询在真实负载下的正确性（含乱序回补后）
 // ---------------------------------------------------------------------------
 STRATUM_TEST(LsmV2Real, F_GetStateAtUnderChaoticTimestamps) {
-  const std::string dir = "/tmp/stratum_v2_state";
+  const std::string dir = std::string("/tmp/stratum_v2_state_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   StratumDB* db = nullptr;

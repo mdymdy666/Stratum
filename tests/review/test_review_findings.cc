@@ -32,6 +32,7 @@
 #include "stratum/storage/lsm/lsm_engine.h"
 #include "stratum/storage/memory/memory_engine.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage;
@@ -87,7 +88,7 @@ void WriteBulk(LsmEngine* engine, const std::string& prefix, int count,
 //   被判定为"旧版本"而丢弃 → Get 返回旧值。
 // ---------------------------------------------------------------------------
 STRATUM_TEST(Regression, C1_SequenceWatermarkSurvivesRestart) {
-  const std::string dir = "/tmp/stratum_reg_c1";
+  const std::string dir = std::string("/tmp/stratum_reg_c1_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略
   }
@@ -152,7 +153,7 @@ STRATUM_TEST(Regression, C1_SequenceWatermarkSurvivesRestart) {
 // 【C1 验证 2】重启后删除，compaction 后数据不得"复活"
 // ---------------------------------------------------------------------------
 STRATUM_TEST(Regression, C1_DeletedDataDoesNotResurrect) {
-  const std::string dir = "/tmp/stratum_reg_c1b";
+  const std::string dir = std::string("/tmp/stratum_reg_c1b_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略
   }
@@ -202,7 +203,7 @@ STRATUM_TEST(Regression, C1_DeletedDataDoesNotResurrect) {
 // 修复前：每次 compaction 都留下旧文件，文件数单调增长。
 // ---------------------------------------------------------------------------
 STRATUM_TEST(Regression, C2_CompactionReleasesDiskSpace) {
-  const std::string dir = "/tmp/stratum_reg_c2";
+  const std::string dir = std::string("/tmp/stratum_reg_c2_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {
     // 忽略
   }

@@ -33,13 +33,14 @@
 
 #include "stratum/probe/probe.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 namespace fs = std::filesystem;
 
 namespace {
 
 std::string FreshShm(const char* tag) {
-  const std::string p = std::string("/dev/shm/stratum_soak_") + tag;
+  const std::string p = std::string("/dev/shm/stratum_soak_") + tag + "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove(p, ec);
   return p;

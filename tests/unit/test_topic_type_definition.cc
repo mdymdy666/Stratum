@@ -28,6 +28,7 @@
 
 #include "stratum/core/timeline_impl_v2.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 namespace fs = std::filesystem;
 
@@ -36,7 +37,7 @@ using namespace stratum;
 namespace {
 
 std::string TempDir(const char* tag) {
-  const std::string d = std::string("/tmp/stratum_typedef_") + tag;
+  const std::string d = std::string("/tmp/stratum_typedef_") + tag + "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(d, ec);
   fs::create_directories(d, ec);

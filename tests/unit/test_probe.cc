@@ -36,6 +36,7 @@
 
 #include "stratum/probe/probe.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 namespace fs = std::filesystem;
 
@@ -43,7 +44,7 @@ namespace {
 
 // 每个用例用独立的 shm，避免互相干扰
 std::string FreshShm(const char* tag) {
-  const std::string p = std::string("/dev/shm/stratum_test_probe_") + tag;
+  const std::string p = std::string("/dev/shm/stratum_test_probe_") + tag + "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove(p, ec);
   return p;
@@ -300,7 +301,7 @@ STRATUM_TEST(ProbeDisable, DisabledMacrosLeaveNoCode) {
   // 然后反汇编，断言 B 的函数体**没有调用任何 stratum_probe_* 符号**。
   //
   // 这是唯一能真正证明"零开销"的方法 —— 看代码觉得没问题不算。
-  const std::string dir = "/tmp/stratum_probe_disable_test";
+  const std::string dir = std::string("/tmp/stratum_probe_disable_test_") + UniqueSuffix();
   std::error_code ec;
   fs::create_directories(dir, ec);
 

@@ -29,6 +29,7 @@
 #include "stratum/storage/lsm/lsm_engine.h"
 #include "stratum/storage/memory/memory_engine.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage;
@@ -37,7 +38,7 @@ namespace {
 
 // 每个引擎在独立目录下运行（LSM 需要真实文件系统）
 std::string EngineDir(const std::string& engine_name) {
-  return "/tmp/stratum_contract_" + engine_name;
+  return std::string("/tmp/stratum_contract_") + engine_name + "_" + UniqueSuffix();
 }
 
 // ---------------------------------------------------------------------------

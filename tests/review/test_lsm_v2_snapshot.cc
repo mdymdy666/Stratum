@@ -6,6 +6,7 @@
 
 #include "stratum/storage/lsm_v2/stratum_db.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 using namespace stratum::storage::lsm_v2;
@@ -21,7 +22,7 @@ constexpr uint64_t kBaseTs = 1700000000000000000ULL;
 //         （ReadOptions 没接 snapshot），保留点是空转的 API。
 // ---------------------------------------------------------------------------
 STRATUM_TEST(LsmV2, P3_RetentionPointTimeTravel) {
-  const std::string dir = "/tmp/stratum_v2_p3";
+  const std::string dir = std::string("/tmp/stratum_v2_p3_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   StratumDB* db = nullptr;

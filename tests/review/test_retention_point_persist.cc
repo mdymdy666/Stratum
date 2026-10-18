@@ -12,6 +12,7 @@
 
 #include "stratum/core/timeline_impl_v2.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 using namespace stratum;
 
@@ -20,7 +21,7 @@ constexpr uint64_t kBaseTs = 1700000000000000000ULL;
 }
 
 STRATUM_TEST(P4, RetentionPointSurvivesRestartAndProtects) {
-  const std::string dir = "/tmp/stratum_p4";
+  const std::string dir = std::string("/tmp/stratum_p4_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   constexpr int kCount = 3000;           // 3000 条跨 300 秒
@@ -111,7 +112,7 @@ STRATUM_TEST(P4, RetentionPointSurvivesRestartAndProtects) {
 }
 
 STRATUM_TEST(P4, ReleaseRetentionPointPersists) {
-  const std::string dir = "/tmp/stratum_p4b";
+  const std::string dir = std::string("/tmp/stratum_p4b_") + UniqueSuffix();
   if (system(("rm -rf " + dir).c_str()) != 0) {}
 
   {

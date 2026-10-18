@@ -36,6 +36,7 @@
 
 #include "stratum/probe/probe_config.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 namespace fs = std::filesystem;
 
@@ -44,7 +45,7 @@ using namespace stratum::probe;
 namespace {
 
 std::string TempDir(const char* tag) {
-  const std::string d = std::string("/tmp/stratum_pcfg_") + tag;
+  const std::string d = std::string("/tmp/stratum_pcfg_") + tag + "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(d, ec);
   fs::create_directories(d, ec);
