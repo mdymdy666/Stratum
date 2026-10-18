@@ -182,6 +182,9 @@ int CmdMetrics(const std::vector<std::string>& args, GlobalOptions g);
 int CmdProbe(const std::vector<std::string>& args, GlobalOptions g);
 int CmdProbeStatus(const std::vector<std::string>& args, GlobalOptions g);
 int CmdDiff(const std::vector<std::string>& args, GlobalOptions g);
+// 多会话合并（`session merge`）：把多份会话放到同一条时间轴上。
+// 设计裁决见 docs/16-session-merge.md。
+int CmdMerge(const std::vector<std::string>& args, GlobalOptions g);
 
 // 尚未实现的子命令（明确报错，不静默）
 int CmdNotImplemented(const std::string& name);

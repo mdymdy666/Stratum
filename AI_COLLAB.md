@@ -10302,3 +10302,237 @@ $ wait
 
 注：并发验证中途确实抓到过遗漏（`test_diff` / `test_diff_symmetry` 双份同时失败），
 补漏后重跑才全绿 —— 这条验收标准本身证明是必要的。
+
+---
+
+## 2026-10-18（续 136）| stratum session merge · 三步：裁决 → 实现 → 测试
+
+### 一、裁决（`docs/16-session-merge.md`，先写文档再写代码）
+
+| 问题 | 裁决 | 关键理由 |
+|---|---|---|
+| 用哪个时钟对齐 | **`source_timestamp_ns`，按绝对值合并，不做重定基**；`reception` 只在 source 无效时兜底并计数 | 同一发布者的同一条广播，在两个接收端拿到的 source 是**同一个数**（`recorder.cc` 只在缺失时退化）；reception 差一个网络往返 —— 用它对齐等于把要消除的误差当基准 |
+| 同名 topic 怎么表示 | **合成一个，名字原样保留**；来源信息只进报告 | 加前缀会同时弄坏三件事：`_probe.` 探针分类失效、`diff` 按 topic 名配对退化成全量增删、现有 `query` 脚本查不到 |
+| 去重按什么 | **`(topic, 合并后 source_ts, payload_hash)` 三元组，仅跨源，默认开启** | `seq` 是录制器本地分配的（`types.h` 明写），跨会话不可比；只看 payload 哈希会删掉真实重复发布；reception 永远不等 |
+
+核心约束：**合并不判断数据对错**（不修正、不补齐、不删源数据，只把多份放到同一时间轴）。
+输出里 `note` 字段是契约。有冲突或可疑时钟偏差 → **5 PARTIAL**（合并成功但需要人看）。
+
+三条局限写进文档（不能只写代码注释）：
+① 发布端时钟不同源 → 跨源先后/间隔不可信；② 时钟跳变会被合并抹平；
+③ 合并只传递精度、不改善精度，合并产物的 `verify` 结论**不能反推源**。
+
+### 二、实现（`src/cli/cmd_merge.cc`，1116 行）
+
+* 复用 `TimelineImplV2` / `Query`：`ListTopics` 拿清单 → `Query::FindTopic`（内部
+  `FindTopicByName`）拿 `topic_id` → `QueryRange` 读事件。**`TopicSummary` 没有
+  `topic_id`，这一步不能省。**
+* 源预检用 `SessionExists + LooksLikeSession`：普通目录不算会话，
+  否则 `Open()` 会在拼错的目录里建出空会话（diff 踩过的同一个坑）。
+* 目标已存在且非空 → `EXISTS(3)`；`--overwrite` 才清空；目标 == 源、或目标是源的父目录
+  → `USAGE(2)`（后者是防 `--overwrite` 把源一起删掉）。
+* 每个话题在内存里按 `(合并后 ts, 源序号, seq)` 排序后分批 `AppendBatch`。
+  **不排序就会让合并会话的 `timestamp_regressions` 暴涨、`verify` 报假故障**
+  （第一版按源顺序写，正是这个问题）。
+* 去重只跨源：`dedup[key] = 首个写出它的源`，同源重复保留（测试专门验证这个越界方向）。
+* 冲突 = 同 topic、同合并后时间戳、不同 payload、跨源 → 两条都保留 + 计数。
+* 时钟偏差观测 = 同 topic、同 payload 哈希、跨源、时间相邻配对，报 `min/max/median`
+  （只报不改；`samples==0` 时明确写"无法观测"）。
+* 输出：JSON（契约字段）+ `--format table` 人类可读 + `--report <文件>` 另存 JSON。
+  偏差警告走 stderr（stdout 保持纯净）。
+
+### 三、测试（`tests/integration/test_merge.cc`，**12 个用例** = 11 个场景 + 1 个随机不变量；
+ctest 65 → **66** —— 一个测试二进制算一个 ctest 条目，之前提交信息里的「→ 75」是错误口径，在此更正）
+
+| 用例 | 结果 |
+|---|---|
+| SingleSourceIsCopy（用 `diff 源 产物` 当硬判据 + `has_integrity_issue=false`） | ✅ |
+| DisjointTimelineIsUnion（100+80=180，first/last/span 精确） | ✅ |
+| BroadcastDuplicatesAreMerged（115 → 65，dedupe 50，`--dedupe none` → 115） | ✅ |
+| SameSourceNotDeduped（同源同刻同内容 3 条全留，跨源 1 条去掉） | ✅ |
+| ClockSkewDetectionAndOffset（+100ms：80 条 + 退出 5；`--offset -100ms`：40 条 + 退出 0） | ✅ |
+| ThresholdLevels（5ms 默认 → notice+0；`--skew-warn 1ms` → warning+5；200ms → notice+0；非法阈值 → 2） | ✅ |
+| EmptySource（空+20=20；空+空=0；都不崩） | ✅ |
+| TenSources（10×100=1000，覆盖度 10，产物可查） | ✅ |
+| SameTimestampDifferentPayload（conflicts=5，两条都留，退出 5） | ✅ |
+| CliErrors（NOTFOUND 8 / EXISTS 3 / USAGE 2 ×5 / `--overwrite` 重建 / 失败不建目标） | ✅ |
+| TableMatchesJson（table 有人类可读文本 + 说明；`--report` 落盘仍是合法 JSON） | ✅ |
+| RandomInvariant（固定种子 3×20 条、键空间 8×5 → 22 条跨源重复；不变量：保留 = Σ 源序号最小者的条数） | ✅ |
+
+`ctest -R test_merge` 在 `/UserData/CodexWorkSpace/Stratum-merge/build` 上通过（1.53s）。
+
+### 四、踩到的两件事（都不是功能本身的问题，但都浪费了时间）
+
+**① 工作目录找错，先在 E: 上做了一轮。**
+`ls -d /mnt/e/CodexWorkspace/Stratum-merge` 不存在 → 以为主控没建，就在 E: 建了
+worktree 并提交。真实路径 `/UserData/CodexWorkSpace/Stratum-merge` 一直存在；
+根因是 `ls /UserData/CodexWorkSpace/* | head` 把 `Stratum`/`Stratum-merge` 截掉了
+（字母序排在 `raftKV*`、`ROS` 之后）。**教训：路径确认要用 `ls -d <精确路径>`
+或 `git worktree list`，不要用带 `head` 的宽匹配去下结论。**
+修正方式：`git format-patch` + `git am` 把两个提交原样迁移，内容零改动。
+
+**② 全量 ctest 的假失败：三个既有 suite 不能与另一个 worktree 并发跑。**
+`test_cli_probe` / `test_verify_business` / `test_cli_io_doctor` 使用**硬编码 tag**
+（`/dev/shm/stratum_it_probe_*`、`$HOME/stratum_it_probe_*`、`/dev/shm/stratum_vb_*`）
+和**固定 DDS domain 43**；两个 worktree 同时跑全量会互相抢路径/域 → 假失败。
+另外 fresh worktree 的 `build/tools/` 是空的：`tools/` 不进 CMake，
+`test_cli_io_doctor` 依赖的 `make_timeline` 必须手工生成，
+否则它的 11 个 `MakeSession()` 断言全挂。
+我这边：已在本地 `build/tools/` 手工构建（构建产物不入库），并**等主控放行**后再跑全量；
+期间只跑 `test_merge`（用 `$HOME` 下带 pid 的独有目录，不碰 DDS）。
+
+### 五、本轮完成 / 未完成 / 已知局限
+
+**完成**
+
+* `docs/16-session-merge.md`：三个裁决 + 输出契约 + 退出码 + 三条局限 + 50ms 数字例子
+  + payload 1 字节风险 + 实现口径（§十一）+ 保留哪一条的规则
+* `src/cli/cmd_merge.cc`（+ session 分派、CMake、main help）：源预检 / 目标策略 /
+  绝对时间轴 / 显式 offset / 跨源去重 / 冲突计数 / 偏差观测 / table+json / `--report` /
+  `--help`（子命令级）
+* `tests/integration/test_merge.cc`：11 个用例（10 场景 + 1 随机不变量）；ctest 65 → 66
+* 既有能力回归：排除 3 个需要独占的 DDS/外部工具 suite 后 **63/63 全绿**；
+  随后独占跑全量：**66/66 全绿**（214s）
+* 顺手修掉一个新测试抓到的老问题：`stratum --help` 原先返回 2（与「没给子命令」共用
+  分支）；显式请求帮助应当是成功（0）。只改 main.cc 的两行分支，带子命令的
+  `--help` 与无参数行为不变。
+* **偏差告警改成两级 + 可配**（评审意见：1ms 阈值会让 5 失去信号意义）：
+  `notice`（1ms < 幅度 ≤ 阈值，只写 `notices[]`，**不改退出码**）/
+  `warning`（> 阈值，默认 **10ms**，退出 5），`--skew-warn <时长>` 可调。
+  理由：跨主机 NTP/chrony 的 1–10ms 是常态，1ms 就返回 5 会让 5 变成"跨机合并的默认值"。
+  同时写明「**去重是否生效与退出码正交**」：去重键要求时间戳完全相等，
+  5ms 偏差已足以让去重失效（条数翻倍），但退出码仍可能是 0 —— 判断去重看
+  `dedupe.duplicates_removed`，不要看退出码。
+* 按评审确认写进 docs/16 §三：**`merge` 不提供 `--probe-prefix`** —— 合并不改 topic 名，
+  给一个"改名"选项等于让已否决的路径从后门回来，还会破坏 `_probe.` 分类。
+* **两处安全加固**（自查发现，均有测试）：
+  ① `--to /` 必须拒绝 —— "目标是源祖先"的检查依赖 `src[target.size()] == '/'`，
+     对根目录不成立，`--to / --overwrite` 会走到 `fs::remove_all("/")`；
+  ② `--offset` 上限从 9e18 收到 1e18 ns —— 偏移要和 ~1.8e18 的 source 时间戳相加，
+     允许到 9e18 会让 `base + offset` 溢出 int64（UB，不是"算错"而是未定义行为）。
+
+
+**未完成（明确列出）**
+
+* **不做近似时间去重**（没有 `--dup-window`）：只判"完全同一时刻"；有偏差先 `--offset` 校正
+* **不做增量合并**：目标已存在默认拒绝，只能 `--overwrite` 全量重建
+* **不做相对重定基**：那是 `diff` 的领域；merge 要保留绝对时刻
+* **不按来源改 topic 名、不保留逐事件来源**（`Event` 没有来源字段）
+* **`--offset` 最小粒度 1ms**（`ParseDurationNs` 支持 ms/s/m/h/d/w，不支持 ns/us）
+* **不做 CDR 剥离 / 模糊 payload 比对 / 自动时钟校正 / "哪个源更可信"的判断**
+
+**合并不能做什么（用户视角的硬边界）**
+
+1. **不能自动修时间轴**：两个发布端钟不同源时，跨源先后/间隔按原样拼接；
+   错多少就错多少，只能用 `--offset` 校正，且校正量必须有来源（PTP/NTP/`clock_skew` 证据）。
+2. **不能反推源的质量**：合并会话的 quality 是重新累积的（丢弃 0、倒退 0），
+   `verify 合并产物` 只能评价产物，不能说明任何源是完整的。
+3. **不能补齐空洞**：两源都没有数据的时段，合并后仍是空洞，也不会插"缺失"记录。
+4. **不能判断数据对错 / 谁权威**：同名同刻不同内容 → 两条都留，只计数。
+5. **不能保留逐事件来源**：只保留每源的 `contributed` / `duplicates` / `offset`。
+6. **不能在源正被写入时安全合并**：读的是某一时刻的快照，并发写可能读到半截。
+7. **大内存**：全量读入后按时间排序（峰值 ≈ 各源 payload 总量），百万级会话需数 GB；
+   不做外部排序 —— 这条已写进 docs/16 §七。
+8. **`--dedupe none` 的条数是"接收次数"**，不是"真实消息数"。
+
+### 六、自查发现的安全阀（不在需求里，但删掉会要命）
+
+这两个都不是任务要求的，是自查时顺着"如果参数写错会怎样"想到的。
+**后人重构时最可能把它们当"多余的防御"删掉**，所以单独写一节说明为什么不能删。
+
+#### 安全阀 1 · `--to /` 必须拒绝（否则 `--overwrite` 会 `remove_all("/")`）
+
+* **触发条件**：用户手滑把 `--to` 写成 `/` 并加了 `--overwrite`。
+  这是最常见的手滑之一（路径补全按早了、脚本变量为空时 `--to $DIR` 展开成 `--to /` 之类）。
+* **为什么藏得住**：代码里本来有"目标不能是源的祖先目录"的检查，写法是
+  `src_canon.compare(0, target.size(), target) == 0 && src_canon[target.size()] == '/'`。
+  对 `target="/"`，`src_canon[1]` 是 `d`（`/data/...` 的第 2 个字符）而不是 `/`，
+  于是**检查通过** —— 有保护的地方反而漏了。
+* **修法**：在规范化之后、任何删除动作之前，`target_canon == "/"` → `USAGE(2)`。
+* **测试**：`--to /` 断言退出码 2，且**刻意不带 `--overwrite`** ——
+  即使将来阀门失效，测试本身也只会走到 `EXISTS(3)`，不会删任何东西。
+  这是"防御性测试"：不只验证现在对，还保证阀门坏掉时损失有上限。
+
+#### 安全阀 2 · `--offset` 上限 1e18 ns（否则 int64 溢出是 UB）
+
+* **触发条件**：`--offset X=9999999999s` 这类大值。
+* **为什么危险**：合并后时间戳算的是 `base + offset`，`base` 本身约 `1.8e18`；
+  若 offset 允许到 int64 极限 `9.2e18`，相加就溢出 ——
+  **有符号整数溢出在 C++ 是未定义行为（UB）**，不是"算错"：优化器可以假设它不发生，
+  结果可能是任意值，也可能被优化掉边界判断。
+* **修法**：`ParseSignedDuration` 的上限收到 `1e18` ns（约 31.7 年），
+  保证相加后仍在 int64 范围；解析失败 → `USAGE(2)`。
+* **为什么这个上限够用**：任何真实钟差都在秒级以内；31.7 年只是"防止 UB 的天花板"，
+  不是功能限制。
+
+#### 通用原则
+
+> **凡是"用户给的路径/数值会进入删除或算术运算"的地方，都要有一个不依赖业务假设的兜底。**
+> 兜底本身要有测试，而且测试要在"兜底失效"时仍然安全（如上面的不带 `--overwrite`）。
+
+#### 安全阀的通用原则：白名单 > 黑名单（这一条希望 main 上也落地）
+
+删除操作的安全判据不应是"禁掉危险路径"（黑名单，会漏 —— `--to /` 那个洞就是漏的一条），
+而应是"只允许删除**我认识的结构**"（白名单，攻击面可枚举）：
+
+> 例：merge 只写会话 → `!LooksLikeSession(to)` 就拒绝，不管 `to` 是什么。
+
+黑名单是"每想到一个危险路径就加一条"，想漏一个就出洞（而且它要覆盖的命令越多，漏的概率越高）；
+白名单把攻击面从"无穷多的危险路径"收缩到"会话目录格式"这一个可枚举集合，
+而且**不依赖前面几层（规范化 / 前缀比较）的正确性** —— 就算 `weakly_canonical` 有 bug、
+大小写折叠有问题，结构守卫仍然拦得住。这才是兜底该有的样子。
+
+这条原则不只在 merge 成立：`prune`（删时间范围）、`io import`（覆盖目标）、
+`record --overwrite`（清空目录）都适用。**先问"我认识这个结构吗"，再问"这个路径危险吗"。**
+
+#### 一条关于 `weakly_canonical` 的前提（写给未来改代码的人）
+
+`weakly_canonical` 对**不存在的路径**是按字面拼回的（不解析不存在的部分）。
+在当前实现里这没关系：不存在的目标不会被删除。
+**但如果将来加"先创建、失败再删除"的逻辑，这个前提就破了** ——
+创建后再规范化会得到真实路径，而创建前用规范化结果做过的判断可能对不上。
+
+
+#### 安全阀 3 · `--overwrite` 只清空**会话目录**（结构守卫）
+
+* 审计结果：`cmd_merge.cc` 里只有**一处**删除调用（`fs::remove_all(to)`），
+  没有"失败时清理半成品"或临时目录逻辑 —— 所以删除面很小，但这一处直接吃用户给的路径。
+* 路径级守卫（根目录 / HOME / 源的祖先）挡不住"深度足够且不在名单里"的目录，
+  例如把 `--to` 写成某个项目目录、`/data`。而**合并只写会话**，
+  删除非会话目录永远不是必要的 —— 所以加结构守卫：
+  目标非空且 `!LooksLikeSession(target)` → `USAGE(2)`，不删任何东西。
+* 测试：造一个含 `keep.txt` 的普通目录 + `--overwrite`，断言退出码 2 **且文件仍在**。
+
+#### 「目标是源祖先」检查用的是什么手段（回答评审提问）
+
+用的是 `Canonical()` = `fs::weakly_canonical`（**解析 `.` / `..` / 软链接**，不存在
+的后缀按字面拼回去），然后做**字符串前缀比较 + 边界字符检查**
+（`src.compare(0, target.size(), target) == 0 && src[target.size()] == '/'`）。
+
+所以 `//`、`/./`、`/a/../b`、软链接都已被规范化覆盖（`--to //` 有测试断言 2）。
+**残余风险**（如实记下，不假装没有）：
+
+* **大小写不敏感的文件系统**上，前缀比较是字节比较，不折叠大小写 ——
+  若目标与源仅大小写不同，可能绕过"祖先"判断。本项目在 Linux（ext4/drvfs）上跑，
+  暂无此风险；若将来支持大小写不敏感挂载，守卫应改成逐 component 比较。
+* 路径级规则终究是**黑名单思路**。真正兜底的是上面的**结构守卫**：
+  不管路径长什么样，只要不是会话目录就不删 —— 这条不依赖任何路径假设。
+
+### 七、状态
+
+```
+worktree: /UserData/CodexWorkSpace/Stratum-merge（分支 feature/session-merge）
+提交:     abd1df1 docs/16 三个裁决
+          → 3dc4f21 实现 + 10 用例
+          → ff5b00c 文档补充（50ms 例子 / payload 1 字节风险）
+          → a098fae 随机不变量用例
+          → a039953 --help + table 断言 + `--help` 退出码修正
+          → 6f1ef0c 偏差告警两级（notice/warning）+ --skew-warn
+          → 33595ee 安全加固（根目录 / offset 溢出）
+          → ae8b153 / bd75f54 / 10af5e8 文档精确化 + 安全阀一节
+          → e947c65 结构守卫（--overwrite 只清空会话目录）
+单用例:   ctest -R test_merge 通过（**12 个用例** = 11 场景 + 1 随机不变量；repeat x5 稳定）
+全量:     **66/66 通过（216s，并发跑：main 的新版全量测试同时在跑，两边均绿）**
+          最终为 66 个 ctest 条目（基线 65 + test_merge 1），无下降
+push:     未执行（按约定由主控在 Windows 侧统一推送）
+```

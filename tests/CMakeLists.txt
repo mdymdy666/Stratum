@@ -267,3 +267,11 @@ target_compile_definitions(test_cli_runner PRIVATE
 # 让 #include "cli_runner.h" 能找到 tests/ 下的头
 target_include_directories(test_cli_runner PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 set_tests_properties(test_cli_runner PROPERTIES TIMEOUT 200 RUN_SERIAL TRUE)
+
+# session merge：单源=复制（用 diff 当硬判据）/ 无重叠并集 / 广播去重 /
+# 时钟偏差与 --offset 校正 / 空源 / 10 源规模 / 同刻冲突 / 错误码 / 双输出
+stratum_add_test(test_merge integration/test_merge.cc integration cli)
+target_compile_definitions(test_merge PRIVATE
+    MERGE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+target_include_directories(test_merge PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+set_tests_properties(test_merge PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
