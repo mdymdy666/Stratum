@@ -48,6 +48,7 @@ void PrintHelp() {
       "已实现的子命令:\n"
       "  session list  <目录>            列出该目录下的所有会话\n"
       "  session info  <会话>            显示会话元数据、话题摘要与质量统计\n"
+      "  session merge <源...> --to <目标>  把多份会话合并到同一条时间轴上\n"
       "  query         <会话>            查询：列话题 / 按时间范围导出 / 定点状态\n"
       "  verify        <会话>            完整性校验与质量报告\n"
       "  record        <选项>            录制（本版本支持基础选项）\n"

@@ -292,7 +292,9 @@ int CmdSession(const std::vector<std::string>& args, GlobalOptions g) {
   const std::vector<std::string> rest(args.begin() + 1, args.end());
   if (sub == "list") return DoList(rest, g);
   if (sub == "info") return DoInfo(rest, g);
-  if (sub == "delete" || sub == "prune" || sub == "tag" || sub == "merge") {
+  // 实现在 cmd_merge.cc（设计裁决见 docs/16-session-merge.md）
+  if (sub == "merge") return CmdMerge(rest, g);
+  if (sub == "delete" || sub == "prune" || sub == "tag") {
     return CmdNotImplemented("session " + sub);
   }
   return Fail(kUsage, "未知的 session 子命令: " + sub, "本版本支持 list / info",

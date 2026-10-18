@@ -289,7 +289,7 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
     "mode": "absolute",
     "clock": "source_timestamp_ns",
     "fallback_to_reception": 0,
-    "sources": [{"session": "/data/nodeA", "offset_ns": 0},
+    "offsets": [{"session": "/data/nodeA", "offset_ns": 0},
                 {"session": "/data/nodeB", "offset_ns": -100000000}],
     "skew": {"samples": 120, "min_ns": 0, "max_ns": 0, "median_ns": 0, "warning": false}
   },
@@ -297,7 +297,7 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
     "session": "/data/nodeA", "label": "nodeA",
     "events": 1000, "topics": 3, "bytes": 40000,
     "first_ns": 1792228100100000000, "last_ns": 1792228110000000000,
-    "offset_ns": 0,
+    "origin_ns": 1792228100100000000, "offset_ns": 0,
     "contributed": 900, "duplicates": 100, "conflicts": 0,
     "fallback_to_reception": 0, "clamped_timestamps": 0,
     "quality": {"dropped": 0, "sequence_gaps": 0, "missing_messages": 0,
@@ -414,22 +414,24 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 
 ---
 
-## 九、测试计划（进 ctest，目标 65 → ≥73）
+## 九、测试计划（进 ctest，10 个用例，65 → 75）
 
 | 用例 | 验证什么 |
 |---|---|
-| **SingleSourceIsCopy** | 单会话合并 ≡ 复制：`diff 源 合并产物` 退出码 0、条数/topic 一致 |
+| **SingleSourceIsCopy** | 单会话合并 ≡ 复制：`diff 源 合并产物` 退出码 0、条数/topic 一致、产物无完整性问题 |
 | **DisjointTimeline** | 两源无时间重叠 → 条数 = 之和、`span` = 并集、`first/last_ns` 精确 |
-| **★ BroadcastDedup** | 两源都收到同一批（同 topic/ts/payload）→ 合并条数 = 1 份、`duplicates_removed` 精确、退出码 0 |
+| **★ BroadcastDedup** | 两源都收到同一批（同 topic/ts/payload）→ 合并条数 = 1 份、`duplicates_removed` 精确、退出码 0；`--dedupe none` 全保留 |
+| **★ SameSourceNotDeduped** | 同源同刻同内容 3 条全保留，只有跨源的 1 条被去掉（去重只在跨源生效） |
 | **★ ClockSkewOffset** | B 的源时间戳整体 +100ms：默认 → 重复判定失效（条数翻倍）+ `skew.warning=true`；给 `--offset B=-100ms` → 去重生效、条数回到 1 份 |
 | **EmptySource** | 空会话参与合并（一空一非空 / 两空）→ 不崩、条数正确、空源 `contributed=0` |
-| **ManySources** | 10 个源 → 条数 = 之和、每源 `contributed` 正确、topic 数正确 |
-| **ConflictDetected** | 同名同刻不同 payload → `conflicts=1`、两条都保留、退出码 5（PARTIAL） |
-| **Errors** | 源不存在→8、目标已存在→3、参数不足→2、`--to` 缺失→2、目标==源→2 |
-| **TableAndJson** | `--format table` 有人类可读文本且与 JSON 含义一致（条数对得上） |
+| **TenSources** | 10 个源 → 条数 = 1000、每源 `contributed` 正确、topic 覆盖度 10、产物可查 |
+| **SameTimestampDifferentPayload** | 同名同刻不同 payload → `conflicts` 精确、两条都保留、退出码 5（PARTIAL） |
+| **CliErrors** | 源不存在→8 且不创建目标、目标已存在→3、`--overwrite` 重建、参数不足/缺 `--to`/目标==源/非法选项→2 |
+| **TableMatchesJson** | `--format table` 有人类可读文本（含说明）且与 JSON 条数一致 |
 
-**最有价值的两个**：`BroadcastDedup`（去重规则是否成立）与 `ClockSkewOffset`
-（对齐规则的失效边界是否**可观测**）—— 它们是"合并"与"瞎拼"的分界线。
+**最有价值的三个**：`BroadcastDedup`（去重规则是否成立）、`SameSourceNotDeduped`
+（去重不能越界删源数据）、`ClockSkewOffset`（对齐规则的失效边界是否**可观测**）——
+它们是"合并"与"瞎拼"的分界线。
 
 ---
 
@@ -438,3 +440,58 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 | 时间 | 变更 |
 |---|---|
 | 2026-10-18 15:30 | 初版：三个裁决（source 时钟 + 绝对轴 / 同名 topic 合成一个 / 三元组跨源去重）+ 核心约束（不判断对错）+ 输出契约 + 局限（时钟偏差 / 跳变被抹平 / 精度只传递）+ 测试计划 |
+
+---
+
+## 十一、实现时定死的三个口径（写代码时才必须回答的问题）
+
+裁决文档给了方向，但**"同内容"到底怎么算、偏差到底怎么测**在写代码时必须给确切答案。
+这一节记录当时的决定，避免下一个读代码的人重新猜一遍。
+
+### ① 时钟偏差的观测口径：同 payload、跨源、时间相邻配对
+
+两个源的"钟差"没法直接测（没人知道真实时刻）。能测的只有：
+
+```
+同一 topic、同一 payload 哈希、来自不同源的两条记录，时间戳之差
+```
+
+实现上按话题内 `payload 哈希 → [(ts, src)]` 分组，排序后取**时间上相邻且跨源**的配对。
+统计量用 `min / max / median`，不用"平均偏移"。
+
+**为什么用中位数**：重复内容（心跳、恒定值）会把个别配对的差拉大；
+中位数对这类污染稳健。**为什么不用平均**：一个离群值就能把"看起来同步"变成"看起来偏 1 秒"。
+
+**一个必须承认的后果**：`samples == 0` 时报告写"无法观测，不代表没有偏差"——
+没有同内容样本时，工具**没有任何证据**，不能反过来说"时钟是同步的"。
+
+### ② 冲突的精确口径：同刻、跨源、与"首个记录"内容不同
+
+```
+同一 topic、同一（合并后）时间戳、payload 哈希不同、且来自另一个源 → conflicts + 1
+```
+
+**为什么不用"时间窗内的相似匹配"**：窗口大小要猜。窗口给小了漏报，给大了把
+"两个节点各自产生的内容"误判成冲突 —— 与 §五 的护栏直接冲突（宁可少报，不可猜）。
+
+### ③ 写入顺序：按时间排序后追加（否则 `verify` 会报假故障）
+
+第一版如果按"源 1 全部、源 2 全部"追加，第二个源的早期事件会落在第一个源晚期事件之后，
+存储层会把它记为 **时间戳倒退** —— 合并产物 `verify` 报 RC 类问题，
+而真正的原因是**我们自己的写入顺序**。
+
+所以：每个话题在内存里按 `(合并后时间戳, 源序号, seq)` 排序，再分批 `AppendBatch`。
+代价是峰值内存（§七已写），换来的是"合并产物自身是干净的"这条可测性质
+（测试断言 `has_integrity_issue=false`）。
+
+### ④ 一个被测试纠正的预期（如实记录）
+
+写测试时我先假设"两个无时间重叠的会话合并 → 一定退出码 0"。
+第一版测试两个源都用了相同的 payload 序列（`x0..x99` / `x0..x79`），
+结果是 **5**：因为这恰好构成"同内容、跨源、恒定 5.99s 偏差"——
+工具无法区分"时钟偏了 6 秒"和"两个独立数据流碰巧内容相同"。
+
+**修正的是测试，不是实现**：两个独立数据流应当用不同的 payload（真实场景里
+它们本来就不同）。这条写在这里，是为了说明 **PARTIAL(5) 的语义是"有可疑信号"，
+不是"确定有偏差"** —— 保守提示，宁可信其有。
+
