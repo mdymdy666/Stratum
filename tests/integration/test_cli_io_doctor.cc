@@ -22,6 +22,8 @@
 //   · 真实场景 —— ① 备份并还原 ② 传输损坏的检测 ③ 结束后的会话体检
 
 // 标准库头文件必须最先包含
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -29,6 +31,7 @@
 #include <random>
 #include <string>
 #include <sys/wait.h>
+#include <unistd.h>
 #include <vector>
 
 #include "stratum/core/timeline_impl_v2.h"
@@ -65,19 +68,96 @@ RunResult RunCli(const std::string& cmdline) {
   return r;
 }
 
+// 【并发隔离】与 test_cli_probe.cc 同一套约束：
+// 路径必须带 <pid>_<进程内计数>，否则两个 worktree 同时跑时后启动的
+// remove_all 会把先启动的会话删掉。会话也放在 $HOME（项目纪律：/tmp 会被清理）。
+std::string UniqueSuffix() {
+  static std::atomic<uint32_t> counter{0};
+  return std::to_string(::getpid()) + "_" +
+         std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+}
+
 std::string TempDir(const char* tag) {
-  const std::string d = std::string("/tmp/stratum_cli_") + tag;
+  const char* home = std::getenv("HOME");
+  const std::string d = std::string(home ? home : ".") + "/stratum_cli_" + tag +
+                        "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(d, ec);
   fs::create_directories(d, ec);
   return d;
 }
 
-// 用 make_timeline 造一个会话（工具在 build/tools/ 下）
+// 一个**确定不存在**的路径（用完即弃）。必须进程唯一，否则另一个 worktree
+// 的同名目录会让"NOTFOUND 且未创建"的断言随机失败。
+std::string NonexistentPath(const char* tag) {
+  const char* home = std::getenv("HOME");
+  const std::string p = std::string(home ? home : ".") + "/stratum_cli_" + tag +
+                        "_" + UniqueSuffix();
+  std::error_code ec;
+  fs::remove_all(p, ec);
+  return p;
+}
+
+// 造一个可被 CLI 读到的会话。
+//
+// 【为什么不再调用 build/tools/make_timeline】
+// 那个工具只有预编译产物、既没有源码也不在 CMake 里 —— 全新 worktree 里
+// 根本不存在，于是本文件 11 个用例会全部挂在 MakeSession() 上（典型的
+// "测试依赖未声明"）。本文件本来就链接 stratum_all 并 include 了
+// TimelineImplV2（见下面两个大数据量用例），直接用它造会话即可。
+//
+// 话题名固定为 hello_world_topic：CliDoctorReal.LongRunSessionCheckup 的
+// prune 条件按这个名字裁剪，改名会让那个用例静默失去覆盖。
 bool MakeSession(const std::string& path, int count) {
-  const RunResult r = RunCli("./tools/make_timeline " + path + " " +
-                             std::to_string(count) + " > /dev/null");
-  return fs::exists(path) && r.exit_code == 0;
+  constexpr const char* kTopic = "hello_world_topic";
+  constexpr uint64_t kBaseTs = 1700000000000000000ULL;   // 2023-11-14
+  constexpr uint64_t kStepNs = 1000000000ULL;            // 每条间隔 1s
+
+  TimelineImplV2 tl;
+  Status s = tl.Open(path);
+  if (!s.ok()) {
+    std::printf("      [MakeSession] Open 失败: %s\n", s.ToString().c_str());
+    return false;
+  }
+  TopicMetadata meta;
+  meta.topic_name = kTopic;
+  meta.type_name = "HelloWorld";
+  uint32_t topic_id = 0;
+  s = tl.RegisterTopic(meta, &topic_id);
+  if (!s.ok()) {
+    std::printf("      [MakeSession] RegisterTopic 失败: %s\n",
+                s.ToString().c_str());
+    return false;
+  }
+
+  int made = 0;
+  while (made < count) {
+    const int n = std::min(200, count - made);
+    std::vector<Event> batch;
+    batch.reserve(static_cast<size_t>(n));
+    for (int k = 0; k < n; ++k) {
+      Event e;
+      e.topic_id = topic_id;
+      e.seq = static_cast<uint32_t>(made + k + 1);
+      e.source_timestamp_ns = kBaseTs + static_cast<uint64_t>(made + k) * kStepNs;
+      e.reception_timestamp_ns = e.source_timestamp_ns + 1000;
+      e.payload = "{\"id\":" + std::to_string(made + k) + "}";
+      batch.push_back(std::move(e));
+    }
+    s = tl.AppendBatch(batch);
+    if (!s.ok()) {
+      std::printf("      [MakeSession] AppendBatch 失败: %s\n",
+                  s.ToString().c_str());
+      return false;
+    }
+    made += n;
+  }
+  s = tl.Close();
+  if (!s.ok()) {
+    std::printf("      [MakeSession] Close 失败: %s\n", s.ToString().c_str());
+    return false;
+  }
+  return true;
 }
 
 // 统计会话里的总条数（用 CLI 的 CSV 输出）
@@ -231,13 +311,13 @@ STRATUM_TEST(CliIo, ImportRefusesExistingTargetWithoutOverwrite) {
 }
 
 STRATUM_TEST(CliIo, NonexistentSessionIsNotFoundAndNotCreated) {
-  const std::string nope = "/tmp/stratum_cli_definitely_missing_xyz";
-  std::error_code ec;
-  fs::remove_all(nope, ec);
+  const std::string nope = NonexistentPath("definitely_missing_xyz");
+  const std::string nowhere = NonexistentPath("nowhere");
   const RunResult r = RunCli(std::string(kCli) + " io export " + nope +
-                             " --to /tmp/stratum_cli_nowhere");
+                             " --to " + nowhere);
   STRATUM_CHECK_EQ(r.exit_code, 8);      // NOTFOUND
   STRATUM_CHECK_FALSE(fs::exists(nope)); // 查询类命令不得有创建副作用
+  STRATUM_CHECK_FALSE(fs::exists(nowhere));
 }
 
 // ===========================================================================
@@ -303,9 +383,7 @@ STRATUM_TEST(CliDoctor, HealthySessionReportsHealthy) {
 }
 
 STRATUM_TEST(CliDoctor, NonexistentSessionIsNotFound) {
-  const std::string nope = "/tmp/stratum_cli_doc_missing_xyz";
-  std::error_code ec;
-  fs::remove_all(nope, ec);
+  const std::string nope = NonexistentPath("doc_missing_xyz");
   const RunResult r = RunCli(std::string(kCli) + " doctor " + nope);
   STRATUM_CHECK_EQ(r.exit_code, 8);
   STRATUM_CHECK_FALSE(fs::exists(nope));

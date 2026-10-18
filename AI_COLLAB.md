@@ -9947,3 +9947,42 @@ standalone/config:  独立可构建，91 断言全过
   经排查是测试基础设施的缺陷（固定 `/dev/shm` 路径 + 固定 DDS domain 43），
   另一个 worktree 同时跑全量时互相污染 —— 已作为下一轮高优先级修复（见下节）。
 
+
+## 2026-10-18 16:xx — 高优先级：测试基础设施的并发隔离（双 agent 互相污染）
+
+### 根因（实测）
+
+另一个 agent 在 `Stratum-merge` worktree 同时跑全量 ctest 时，本 worktree 的
+全量跑出现 `test_cli_probe` / `test_verify_business` 失败；单独复跑
+`test_verify_business` 通过。定位到两条**测试代码自身的缺陷**：
+
+1. **固定路径**：`MakeEnv(tag)` / `TempDir(tag)` / `FreshShm(tag)` 里的 tag 是
+   硬编码字符串，两个进程用完全相同的 `/dev/shm` 与 `$HOME` 目录，
+   后启动的 `fs::remove_all` 会删掉先启动的数据。
+2. **固定 DDS domain**（43/44/45/47 与 33~37）：同一 domain 上的两个
+   participant 会互相发现、互收样本；即使路径隔离，record 仍会录到对方的
+   数据 —— 表现为随机条数不符。
+
+### 修法
+
+- 路径 = 前缀 + tag + `<pid>_<进程内计数>`（`UniqueSuffix()`）；
+- domain = `base(43) + (pid % 20) * 8 + slot`，同一进程内各用例域仍互不相同；
+  可用 `STRATUM_TEST_DOMAIN_BASE` 覆盖基址做绝对隔离；残留冲突概率
+  = 两个进程 pid 模 20 相同（约 5%），已在注释里写明。
+- `test_cli_io_doctor` 额外修了"未声明的测试依赖"：它原来调用
+  `build/tools/make_timeline`，但该工具**没有源码、也不在 CMake 里**，
+  全新 worktree 里不存在 → 17 个用例全挂。改为直接调 `TimelineImplV2`
+  造会话（本文件本来就链接 stratum_all 并 include 了它），同时把会话目录
+  从 `/tmp` 移到 `$HOME`（项目纪律）并加 pid 后缀。
+
+### 实测证据（修复后）
+
+- 两个 `test_cli_probe` **同时**跑：各 14/14 通过
+- 两个 `test_verify_business` **同时**跑：各 5/5 通过
+- `test_cli_io_doctor`：17/17 通过（不再依赖 make_timeline）
+
+### 未完成 / 风险
+
+- 其余测试仍有固定 `/tmp/stratum_*` 路径（lsm_v2_* / random / review 等），
+  两个 worktree 同时跑时仍可能撞车（LevelDB 有 LOCK，撞上就是硬失败）。
+  已在后续小节继续处理。

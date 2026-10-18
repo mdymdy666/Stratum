@@ -21,6 +21,7 @@
 //   · 崩溃安全：业务被 kill -9 后 ring 仍可读
 
 // 标准库头文件必须最先包含
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -32,6 +33,7 @@
 #include <string>
 #include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "test_framework.h"
@@ -50,6 +52,39 @@ namespace {
 
 std::string kCli = PROBE_CLI_PATH;
 
+// ---------------------------------------------------------------------------
+// 【并发隔离】测试基础设施的两条硬约束（2026-10-18 实测踩到）
+//
+// 1) **路径必须进程唯一**。tag 只区分用例；两个 worktree（或同一 worktree 的
+//    两个 ctest 进程）同时跑时，路径完全相同，后启动的 MakeEnv() 里的
+//    `fs::remove_all(e.root)` 会把先启动的会话与 /dev/shm ring 删掉 ——
+//    表现为随机的"条数对不上 / 发布失败"，极难定位。
+// 2) **DDS domain 不能全进程固定**。同一 domain 上的 participant 会互相发现、
+//    互收数据；即使路径隔离了，record 也会录到另一个进程的样本。
+//
+// 方案：路径 = 前缀 + tag + <pid>_<进程内计数>；domain =
+// base + (pid % 20) * 8 + slot —— 同一进程内各用例仍落在互不相同的域。
+// 残留冲突概率是"两个进程 pid 模 20 相同"（约 5%）；需要绝对隔离时用
+// 环境变量 STRATUM_TEST_DOMAIN_BASE 换一段基址（CI 可设成互不相同的值）。
+// 回归：tests/unit/test_path_isolation.cc 锁住了这两条约束。
+// ---------------------------------------------------------------------------
+std::string UniqueSuffix() {
+  static std::atomic<uint32_t> counter{0};
+  return std::to_string(::getpid()) + "_" +
+         std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+}
+
+int TestDomain(int slot) {
+  static const int base = []() {
+    const char* env = std::getenv("STRATUM_TEST_DOMAIN_BASE");
+    if (env != nullptr && env[0] != '\0') return std::atoi(env);
+    return 43;
+  }();
+  const int pid_offset =
+      static_cast<int>(static_cast<unsigned>(::getpid()) % 20u);
+  return base + pid_offset * 8 + slot;
+}
+
 // 每个用例用独立的 shm 与会话目录（避免互相干扰）
 struct Env {
   std::string shm;
@@ -59,10 +94,12 @@ struct Env {
 
 Env MakeEnv(const char* tag) {
   Env e;
-  e.shm = std::string("/dev/shm/stratum_it_probe_") + tag;
+  const std::string uniq = UniqueSuffix();
+  e.shm = std::string("/dev/shm/stratum_it_probe_") + tag + "_" + uniq;
   // 会话放 $HOME —— /tmp 会被系统定期清理（项目纪律）
   const char* home = std::getenv("HOME");
-  e.root = std::string(home ? home : ".") + "/stratum_it_probe_" + tag;
+  e.root =
+      std::string(home ? home : ".") + "/stratum_it_probe_" + tag + "_" + uniq;
   // 【必须分开】record --dir 指向已存在目录会按 EXISTS 拒绝启动（退出码 3）。
   // 所以 session 用 root 下的**子目录**，由 record 自己创建。
   e.session = e.root + "/session";
@@ -144,7 +181,7 @@ long long PickInt(const std::string& text, const std::string& key) {
 
 STRATUM_TEST(ProbeCli, EndToEndFortySamples) {
   const Env env = MakeEnv("e2e40");
-  const int kDomain = 47;
+  const int kDomain = TestDomain(0);   // e2e40
 
   // 业务程序：20 轮，每轮 2 个 topic（work + detail）= 40 条
   const char* body = R"(
@@ -233,7 +270,7 @@ int main(void) {
 
 STRATUM_TEST(ProbeCli, ConfigDisablesTopic) {
   const Env env = MakeEnv("cfg");
-  const int kDomain = 45;
+  const int kDomain = TestDomain(1);   // cfg
 
   // 配置文件：只关掉 it/second，保留 it/first
   const std::string cfg = env.root + "/probe.ini";
@@ -339,7 +376,7 @@ int main(void) {
 
 STRATUM_TEST(ProbeCli, LargeVolumeThousandSamples) {
   const Env env = MakeEnv("big");
-  const int kDomain = 44;
+  const int kDomain = TestDomain(2);   // big
 
   const char* body = R"(
 int main(void) {
@@ -544,7 +581,7 @@ STRATUM_TEST(ProbeCli, RandomTopicsMultipleSeeds) {
 // 这样运维在真出现突发丢包时，能立刻判断"是网络丢了，不是探针没采"。
 STRATUM_TEST(ProbeCli, BurstLossIsVisibleNotSilent) {
   const Env env = MakeEnv("burst");
-  const int kDomain = 43;
+  const int kDomain = TestDomain(3);   // burst
 
   // 零间隔连发 800 条 —— 刻意制造突发
   const char* body = R"(

@@ -14,6 +14,7 @@
 // 这条用例是防止该功能越界的护栏。
 
 // 标准库头文件必须最先包含
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +23,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <unistd.h>
 
 #include "test_framework.h"
 
@@ -37,6 +39,26 @@ namespace {
 #endif
 
 std::string kCli = PROBE_CLI_PATH;
+
+// 【并发隔离】与 test_cli_probe.cc 同一套约束（详见那里的说明）：
+//   · 目录/shm 路径必须带 <pid>_<计数>，否则两个 worktree 同时跑会互删；
+//   · DDS domain 必须按进程偏移，否则两个进程的 participant 互相收数据。
+std::string UniqueSuffix() {
+  static std::atomic<uint32_t> counter{0};
+  return std::to_string(::getpid()) + "_" +
+         std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+}
+
+int TestDomain(int slot) {
+  static const int base = []() {
+    const char* env = std::getenv("STRATUM_TEST_DOMAIN_BASE");
+    if (env != nullptr && env[0] != '\0') return std::atoi(env);
+    return 43;
+  }();
+  const int pid_offset =
+      static_cast<int>(static_cast<unsigned>(::getpid()) % 20u);
+  return base + pid_offset * 8 + slot;
+}
 
 struct CliResult {
   int code = -1;
@@ -56,7 +78,8 @@ CliResult RunCli(const std::string& cmd) {
 
 std::string TempDir(const char* tag) {
   const char* home = std::getenv("HOME");
-  const std::string d = std::string(home ? home : ".") + "/stratum_vb_" + tag;
+  const std::string d = std::string(home ? home : ".") + "/stratum_vb_" + tag +
+                        "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(d, ec);
   fs::create_directories(d, ec);
@@ -64,7 +87,8 @@ std::string TempDir(const char* tag) {
 }
 
 std::string FreshShm(const char* tag) {
-  const std::string p = std::string("/dev/shm/stratum_vb_") + tag;
+  const std::string p =
+      std::string("/dev/shm/stratum_vb_") + tag + "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove(p, ec);
   return p;
@@ -108,9 +132,11 @@ struct Recorded {
   std::string shm;
 };
 
-Recorded RecordProbeSession(const char* tag, uint32_t domain, const std::string& biz_body,
+Recorded RecordProbeSession(const char* tag, int domain_slot, const std::string& biz_body,
                             int ok_count, int err_count, std::string* err) {
   Recorded r;
+  // domain 由 slot 推导：同一进程内各用例域不同，跨进程按 pid 偏移（见 TestDomain）
+  const uint32_t domain = static_cast<uint32_t>(TestDomain(domain_slot));
   r.root = TempDir(tag);
   r.session = r.root + "/s";
   r.shm = FreshShm(tag);
@@ -160,7 +186,7 @@ int main(void) {
 }
 )";
   std::string err;
-  const Recorded rec = RecordProbeSession("b1", 37, body, 16, 4, &err);
+  const Recorded rec = RecordProbeSession("b1", 0, body, 16, 4, &err);
   if (!fs::exists(rec.session)) {
     std::printf("      [跳过] 会话未创建（DDS 环境问题）: %s\n", err.c_str());
     Cleanup(rec);
@@ -202,7 +228,7 @@ int main(void) {
 }
 )";
   std::string err;
-  const Recorded rec = RecordProbeSession("b2", 36, body, 16, 4, &err);
+  const Recorded rec = RecordProbeSession("b2", 1, body, 16, 4, &err);
   if (!fs::exists(rec.session)) {
     std::printf("      [跳过] 会话未创建: %s\n", err.c_str());
     Cleanup(rec);
@@ -250,7 +276,7 @@ int main(void) {
 }
 )";
   std::string err;
-  const Recorded rec = RecordProbeSession("b3", 35, body, 0, 20, &err);
+  const Recorded rec = RecordProbeSession("b3", 2, body, 0, 20, &err);
   if (!fs::exists(rec.session)) {
     std::printf("      [跳过] 会话未创建: %s\n", err.c_str());
     Cleanup(rec);
@@ -293,7 +319,7 @@ int main(void) {
 }
 )";
   std::string err;
-  const Recorded rec = RecordProbeSession("b4", 34, body, 5, 0, &err);
+  const Recorded rec = RecordProbeSession("b4", 3, body, 5, 0, &err);
   if (!fs::exists(rec.session)) {
     std::printf("      [跳过] 会话未创建: %s\n", err.c_str());
     Cleanup(rec);
@@ -327,7 +353,7 @@ int main(void) {
 }
 )";
   std::string err;
-  const Recorded rec = RecordProbeSession("b5", 33, body, 3, 0, &err);
+  const Recorded rec = RecordProbeSession("b5", 4, body, 3, 0, &err);
   if (!fs::exists(rec.session)) {
     std::printf("      [跳过] 会话未创建: %s\n", err.c_str());
     Cleanup(rec);
