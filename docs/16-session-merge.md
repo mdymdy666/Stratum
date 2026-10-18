@@ -154,7 +154,7 @@ source 缺失时才退化为 reception。所以 A、B 两份录制里同一条�
 * 若两个节点都转发同一份广播（两条 publisher 各自序列化），source 差 50ms
   会让去重失效、条数翻倍；
 * 修正：`--offset /data/nodeB=-50ms`。报告里 `offset_ns=-50000000` 是这次校正的
-  审计痕迹，`clock_skew.median_ns=50000000` 是它的证据。
+  审计痕迹，`alignment.skew.median_ns=50000000` 是它的证据。
 
 ### ★ 必须同时写进文档的局限（不能只写在代码注释里）
 
@@ -172,7 +172,7 @@ source 缺失时才退化为 reception。所以 A、B 两份录制里同一条�
 > 情况 A）。这条局限针对的是「不同发布者」或「source 缺失、退化为 reception」。
 >
 > 此时唯一正确的做法是 `--offset` 校正，且**校正量必须有来源**（PTP 日志、
-> NTP 偏差、或用 `clock_skew.median_ns` 作为证据并写进报告）。
+> NTP 偏差、或用 `alignment.skew.median_ns` 作为证据并写进报告）。
 >
 > **② 时钟跳变会被合并"抹平"。**
 > 源时间戳倒退时，存储层仍按时间戳排序；合并再按时间戳归并一次，
@@ -310,7 +310,7 @@ conflicts = 同一 topic、同一（合并后）时间戳、但 payload 哈希�
 **怎么发现**：若你确信两个源录了同一份广播，但 `dedupe.duplicates_removed == 0`，
 按可能性排查：
 
-1. 时钟偏差 —— 看 `clock_skew`（有样本就说明同内容出现了不同时刻）；
+1. 时钟偏差 —— 看 `alignment.skew`（有样本就说明同内容出现了不同时刻）；
 2. payload 字节差异 —— 用 `query <源> --topic <名> --with-payload` 两份对照。
 
 工具**不会**自动剥离 CDR 封装、不会做模糊匹配、不会"差几个字节也算同一条"——
