@@ -636,4 +636,73 @@ STRATUM_TEST(CliDoctorReal, LongRunSessionCheckup) {
               "且退出码为 0（主动行为不算问题）\n");
 }
 
+// ===========================================================================
+// 八、★ 删除安全：io export/import 的 --to 不能删"不认识"的目录
+//
+// 背景：`--overwrite` 会 fs::remove_all(--to)。历史缺陷（merge 的 --to /）
+// 说明"有检查"不等于"检查在边界上正确"。这里用**含 keep.txt 的普通目录**
+// 验证结构白名单：非空且不是 bundle/会话的目录，即使给了 --overwrite 也
+// 一个字都不能删。断言"文件还在"，而不只是退出码。
+// ===========================================================================
+
+STRATUM_TEST(CliIoSafety, OverwriteRefusesUnrelatedDirAndKeepsFiles) {
+  const std::string src = TempDir("safe_src");
+  STRATUM_CHECK_TRUE(MakeSession(src, 50));
+
+  std::error_code ec;
+
+  // 1) export：目标含 keep.txt（非空、无 MANIFEST.json）→ USAGE(2)，文件仍在
+  const std::string bad_export = TempDir("safe_bad_export");
+  fs::create_directories(bad_export, ec);
+  {
+    std::ofstream o(bad_export + "/keep.txt", std::ios::out | std::ios::trunc);
+    o << "precious\n";
+  }
+  RunResult r = RunCli(std::string(kCli) + " io export " + src + " --to " +
+                       bad_export + " --overwrite");
+  STRATUM_CHECK_EQ(r.exit_code, 2);
+  STRATUM_CHECK_TRUE(r.output.find("不安全") != std::string::npos);
+  STRATUM_CHECK_TRUE(fs::exists(bad_export + "/keep.txt"));
+
+  // 2) import：先导出一个合法 bundle，再把 --to 指向含 keep.txt 的目录
+  const std::string bundle = TempDir("safe_bundle");
+  fs::remove_all(bundle, ec);
+  r = RunCli(std::string(kCli) + " io export " + src + " --to " + bundle);
+  STRATUM_CHECK_EQ(r.exit_code, 0);
+
+  const std::string bad_import = TempDir("safe_bad_import");
+  fs::create_directories(bad_import, ec);
+  {
+    std::ofstream o(bad_import + "/keep.txt", std::ios::out | std::ios::trunc);
+    o << "precious\n";
+  }
+  r = RunCli(std::string(kCli) + " io import " + bundle + " --to " + bad_import +
+             " --overwrite");
+  STRATUM_CHECK_EQ(r.exit_code, 2);
+  STRATUM_CHECK_TRUE(r.output.find("不安全") != std::string::npos);
+  STRATUM_CHECK_TRUE(fs::exists(bad_import + "/keep.txt"));
+
+  // 3) 危险路径即使**不带** --overwrite 也在参数阶段被拒绝，目标仍在。
+  //    这条同时验证"守卫失效时的损失上限"：没给 --overwrite 时即使守卫
+  //    被改坏，也只会落到 EXISTS 分支，不会执行 remove_all。
+  for (const char* p : {"/", ".", ".."}) {
+    r = RunCli(std::string(kCli) + " io export " + src + " --to " + p);
+    STRATUM_CHECK_EQ(r.exit_code, 2);
+    STRATUM_CHECK_TRUE(fs::exists(p));
+  }
+
+  // 4) 正例：空目录仍可导出（防止守卫过严）
+  const std::string ok = TempDir("safe_ok");
+  // TempDir 创建了目录；export 对"已存在且未给 --overwrite"会返回 EXISTS。
+  // 这里要验证的是"守卫不误伤合法目标"，所以先删掉让它成为新建目标。
+  fs::remove_all(ok, ec);
+  r = RunCli(std::string(kCli) + " io export " + src + " --to " + ok);
+  STRATUM_CHECK_EQ(r.exit_code, 0);
+  STRATUM_CHECK_TRUE(fs::exists(ok + "/MANIFEST.json"));
+
+  std::printf("      [删除安全] 含 keep.txt 的目标被拒（export/import），"
+              "文件仍在；/ . .. 参数阶段拒绝；空目录仍可导出\n");
+}
+
+
 STRATUM_TEST_MAIN()

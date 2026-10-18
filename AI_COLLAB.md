@@ -10058,3 +10058,52 @@ $ wait
 - 测试：`test_recorder_queue.RejectsInvalidWriteBatchSize`（0 与 SIZE_MAX 被拒，
   合法值仍能启动）；`test_record_cli_errors` 5 个非法值断言退出码 2 且目录未创建。
 
+
+## 2026-10-18 16:4x — 真问题：删除类命令缺少统一守卫（--overwrite 可删任意目录）
+
+### 审计范围与结果（`grep -rn "remove_all\|fs::remove\|unlink\|rmdir" src/cli src/src`）
+
+| 命令 | 删除点 | 风险 |
+|---|---|---|
+| `io export --to` | `cmd_io.cc:532` `if (exists) fs::remove_all(to)` | `--overwrite --to /` → 删根；`--to $HOME` → 删家目录 |
+| `io import --to` | `cmd_io.cc:690` 同上 | 同上 |
+| `record --dir --overwrite` | `cmd_record.cc:383` `fs::remove_all(o.dir)` | `--overwrite --dir /` → 删根 |
+| `prune` | 无文件系统删除（只做 DB DeleteRange） | 风险是"删事件数据"，非"删目录"；非会话路径打不开库，无删除副作用 |
+| `doctor --recover` / `ctl` | 只截断 `session.lock` | 不遍历、不删目录 |
+| `lsm_engine.cc` `unlink` | 只删自己刚合并掉的 SSTable | 路径由引擎生成，非用户输入 |
+
+### 修法：`src/cli/safe_path.h`（四层，越内层越不依赖外层正确性）
+
+1. 字符串层：非空、非 `.`、非 `..`
+2. 规范化层：`weakly_canonical`（解析软链接、归一化 `.`/`..`/`//`）后
+   不等于根目录、不等于 `$HOME`、不是当前工作目录及其祖先；
+   比较用**路径组件**（`IsPathPrefixOf`），不用字符串前缀
+3. **结构白名单**（关键）：调用方声明"我要覆盖什么结构"
+   - `record --dir`：空目录 或 合法会话（有 `CURRENT`）
+   - `io export --to`：空目录 或 合法 bundle（有 `MANIFEST.json`）
+   - `io import --to`：空目录 / 合法会话 / 合法 bundle
+   非空且不认识 → 拒绝；**这一层不依赖第 1/2 层**
+4. fail-closed：调用方没给结构判定 → 拒绝
+
+三个删除点**无条件**调用（不只在 `--overwrite` 时）——
+这样即使守卫将来被改坏，未给 `--overwrite` 时也只会落到 EXISTS 分支，
+损失上限是"命令报错"，不会删东西。
+
+### 证据
+
+- `tests/unit/test_safe_remove.cc`（4 用例）：`/`、`//`、`/.`、`/..`、
+  `/tmp/../..`、`.`、`..`、空串、`$HOME`、cwd、cwd 祖先、**软链接到 cwd**
+  全部拒绝；含 `keep.txt` 的普通目录被三种白名单拒绝；会话 ≠ bundle；
+  不存在/空目录/会话/bundle 可覆盖；未给结构判定时 fail-closed。
+- `tests/integration/test_record_cli_errors.cc`：
+  `record --dir <含 keep.txt> --overwrite` → 退出码 2 **且 keep.txt 仍在**；
+  `/`、`.`、`..`、`$HOME`（**不带** --overwrite）→ 退出码 2 且目标仍在。
+- `tests/integration/test_cli_io_doctor.cc` 新增 `CliIoSafety`：
+  export/import `--to <含 keep.txt> --overwrite` → 2 且文件仍在；
+  `--to / . ..`（不带 --overwrite）→ 2 且目标存在；空目录仍可正常导出。
+
+### 已知风险（明确未接守卫的）
+
+- `prune` / `doctor --recover` / `ctl` 目前不遍历删除目录（已按上表核实）。
+  若将来在这些命令里加入删除目录的逻辑，**必须**接入 `IsSafeToRemove` + 对应结构白名单。
+- 守卫只保护"删除目标"，不保护"源"（源路径只读，不需要）。

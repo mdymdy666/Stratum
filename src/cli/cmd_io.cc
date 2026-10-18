@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "cli_common.h"
+#include "safe_path.h"
 #include "stratum/core/timeline_impl_v2.h"
 
 namespace fs = std::filesystem;
@@ -490,6 +491,18 @@ int CmdIo(const std::vector<std::string>& args, GlobalOptions g) {
                   "导出的 bundle 要有地方放",
                   "例如: --to /backup/s1.bundle");
     }
+    // 【删除安全】--overwrite 会 fs::remove_all(--to)。无条件先过共享守卫：
+    // 规范化后拒绝 /、$HOME、当前目录祖先；结构白名单只接受"空目录或合法
+    // bundle（有 MANIFEST.json）"。含无关文件的普通目录一律拒绝覆盖。
+    {
+      std::string unsafe_reason;
+      if (!IsSafeToRemove(to, LooksLikeEmptyOrBundle, &unsafe_reason)) {
+        return Fail(kUsage, "io export --to 指向不安全的目标: " + to,
+                    unsafe_reason,
+                    "请指向一个空目录或已有的 bundle；不能是 /、$HOME、"
+                    "当前目录祖先，也不能是含无关数据的普通目录");
+      }
+    }
     if (!SessionExists(src)) {
       return Fail(kNotFound, "会话不存在: " + src, "路径不存在或不是目录",
                   "用 `stratum session list <父目录>` 列出可用会话");
@@ -645,6 +658,17 @@ int CmdIo(const std::vector<std::string>& args, GlobalOptions g) {
     if (to.empty()) {
       return Fail(kUsage, "io import 需要 --to <目标会话路径>",
                   "要还原到哪里必须明确", "例如: --to /data/stratum/s1-restored");
+    }
+    // 【删除安全】同上：--overwrite 会 fs::remove_all(--to)。结构白名单接受
+    // "空目录 / 合法会话（有 CURRENT）/ 合法 bundle（有 MANIFEST.json）"。
+    {
+      std::string unsafe_reason;
+      if (!IsSafeToRemove(to, LooksLikeEmptyOrSessionOrBundle, &unsafe_reason)) {
+        return Fail(kUsage, "io import --to 指向不安全的目标: " + to,
+                    unsafe_reason,
+                    "请指向空目录、已有会话或已有 bundle；不能是 /、$HOME、"
+                    "当前目录祖先，也不能是含无关数据的普通目录");
+      }
     }
 
     // 【关键】导入前**先校验** —— 拒绝把损坏的 bundle 还原成"看起来正常"的会话

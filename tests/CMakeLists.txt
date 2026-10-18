@@ -39,6 +39,13 @@ stratum_add_test(test_review_findings review/test_review_findings.cc review)
 
 stratum_add_test(test_recorder_queue review/test_recorder_queue.cc review)
 
+# record CLI 的参数边界：--write-batch-size 0/-1/abc 必须在产生副作用前拒绝
+# （实测 bug：0 让写盘线程永不消费队列、Stop 永久阻塞；-1 在 reserve 时 terminate）
+stratum_add_test(test_record_cli_errors integration/test_record_cli_errors.cc integration cli)
+target_compile_definitions(test_record_cli_errors PRIVATE
+    RECORD_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_record_cli_errors PROPERTIES TIMEOUT 120)
+
 stratum_add_test(test_wal_corruption review/test_wal_corruption.cc review)
 
 stratum_add_test(test_recorder_concurrency review/test_recorder_concurrency.cc review)
@@ -171,6 +178,10 @@ stratum_add_test(test_probe_boundary unit/test_probe_boundary.cc unit probe)
 # ring 复用的容量一致性：用更小的容量重开已存在的段，映射不得小于头部容量
 # （实测 bug：mmap 按本次请求容量，槽位却按头部容量算 → 写越界 SIGSEGV）
 stratum_add_test(test_probe_ring_reuse unit/test_probe_ring_reuse.cc unit probe)
+
+# 删除守卫：规范化层（/ $HOME cwd 祖先 软链接）+ 结构白名单（只删会话/bundle）
+stratum_add_test(test_safe_remove unit/test_safe_remove.cc unit cli)
+target_include_directories(test_safe_remove PRIVATE "${CMAKE_SOURCE_DIR}/src/cli")
 
 # 读取器对坏 ring 的头部校验：capacity 与文件长度不符时必须拒绝而不是越界读
 stratum_add_test(test_probe_corrupt_ring integration/test_probe_corrupt_ring.cc integration probe cli)

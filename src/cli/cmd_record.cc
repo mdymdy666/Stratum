@@ -18,9 +18,11 @@
 //  4. SIGINT/SIGTERM 优雅停止（FR-R-10），不留半截元数据。
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -28,6 +30,7 @@
 #include <vector>
 
 #include "cli_common.h"
+#include "safe_path.h"
 #include "stratum/core/recorder.h"
 #include "stratum/core/timeline_impl_v2.h"
 #include "stratum/protocol/rtps/rtps_backend.h"
@@ -299,6 +302,21 @@ int CmdRecord(const std::vector<std::string>& args, GlobalOptions g) {
                 "缺少会话目录（本版本暂不支持从配置文件读取）",
                 "例如: stratum record --dir /data/stratum/s1 --duration 30s");
   }
+
+  // 【删除安全】`--overwrite` 会 fs::remove_all(--dir)。这里**无条件**先过
+  // 共享守卫（与是否给 --overwrite 无关）：
+  //   · 规范化后拒绝 /、$HOME、当前目录及其祖先；
+  //   · 结构白名单：目标只能是"空目录或合法会话（有 CURRENT）"。
+  // 即使守卫将来被改坏，没给 --overwrite 时这里失败后也只会落到下面的
+  // EXISTS 分支 —— 损失上限是"命令报错"，不会删任何东西。
+  {
+    std::string unsafe_reason;
+    if (!IsSafeToRemove(o.dir, LooksLikeEmptyOrSession, &unsafe_reason)) {
+      return Fail(kUsage, "--dir 指向不安全的目标: " + o.dir, unsafe_reason,
+                  "请指向一个具体的会话目录（不能是 /、$HOME、当前目录祖先，"
+                  "也不能是含无关文件的普通目录）");
+    }
+  }
   if (o.continuous && !o.duration_raw.empty()) {
     return Fail(kUsage, "--continuous 与 --duration 互斥",
                 "一个表示持续录制，一个表示定时录制，语义冲突",
@@ -352,7 +370,26 @@ int CmdRecord(const std::vector<std::string>& args, GlobalOptions g) {
     }
   }
   if (!o.write_batch_raw.empty()) {
-    rc.write_batch_size = static_cast<size_t>(std::strtoul(o.write_batch_raw.c_str(), nullptr, 10));
+    // 【必须严格校验】早期实现是裸 strtoul：
+    //   `--write-batch-size -1` → ULONG_MAX → Reserve(SIZE_MAX) → std::length_error
+    //       → 线程里 terminate（实测 rc=134）
+    //   `--write-batch-size 0` → 写盘线程 `batch.size() < 0` 永不成立 → 队列
+    //       永不消费、Stop 永久阻塞（实测 queue=1 / recorded=0 / Stop 不返回）
+    // 两者都不报错、只表现为"卡住或崩溃"，所以要在进入录制前用 USAGE 挡掉。
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long v =
+        std::strtoull(o.write_batch_raw.c_str(), &end, 10);
+    const bool bad =
+        end == o.write_batch_raw.c_str() || *end != '\0' || errno == ERANGE ||
+        v == 0 || v > 1000000ULL;
+    if (bad) {
+      return Fail(kUsage, "--write-batch-size 取值非法: " + o.write_batch_raw,
+                  "必须是 1..1000000 的整数（0 会让写盘线程永不消费队列，"
+                  "过大会在 reserve 时抛异常）",
+                  "示例: --write-batch-size 256");
+    }
+    rc.write_batch_size = static_cast<size_t>(v);
   }
 
   // ★ 必须显式传入：曾经 Recorder 内部用全新默认对象，导致调用方设的 domain
