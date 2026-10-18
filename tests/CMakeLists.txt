@@ -168,6 +168,16 @@ set_tests_properties(test_cli_probe PROPERTIES RUN_SERIAL TRUE)
 # ring 的边界行为：最小容量 / 序号回绕 / ring 复用 / 长度恰好到上限
 stratum_add_test(test_probe_boundary unit/test_probe_boundary.cc unit probe)
 
+# ring 复用的容量一致性：用更小的容量重开已存在的段，映射不得小于头部容量
+# （实测 bug：mmap 按本次请求容量，槽位却按头部容量算 → 写越界 SIGSEGV）
+stratum_add_test(test_probe_ring_reuse unit/test_probe_ring_reuse.cc unit probe)
+
+# 读取器对坏 ring 的头部校验：capacity 与文件长度不符时必须拒绝而不是越界读
+stratum_add_test(test_probe_corrupt_ring integration/test_probe_corrupt_ring.cc integration probe cli)
+target_compile_definitions(test_probe_corrupt_ring PRIVATE
+    PROBE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
+set_tests_properties(test_probe_corrupt_ring PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+
 # probe 子命令的参数与错误处理（只测解析与退出码，不起重资源）
 stratum_add_test(test_probe_cli_errors integration/test_probe_cli_errors.cc integration cli)
 target_compile_definitions(test_probe_cli_errors PRIVATE

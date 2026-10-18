@@ -131,6 +131,29 @@ bool OpenRingReadOnly(const std::string& path, RingView* out, std::string* err) 
                     "，本程序 " + std::to_string(sizeof(stratum_probe_record));
     return false;
   }
+  // 【越界修复】capacity 决定槽位偏移，必须与文件长度自洽。
+  //
+  // 主循环用 `last_seq % capacity` 定位记录，且只把 committed_seq 当上界。
+  // 若头部声称的容量远大于文件实际长度（写侧崩溃留下截断的段、旧版本残留、
+  // 或人为构造），槽位偏移会越过 mmap —— 读取器直接 SIGSEGV（已实测：
+  // 头部 capacity=1M、文件 4KB、committed=200000 时崩溃）。
+  // 这里是读取器唯一能发现"段不完整"的地方，必须在建视图前拒绝。
+  {
+    const uint64_t need = stratum_ring_bytes(hdr->capacity);
+    const uint64_t have = static_cast<uint64_t>(st.st_size);
+    if (hdr->capacity == 0 || have < need) {
+      const uint32_t declared = hdr->capacity;
+      ::munmap(p, (size_t)st.st_size);
+      ::close(fd);
+      if (err) {
+        *err = "共享内存长度不足：头部声明 capacity=" +
+               std::to_string(declared) + "（需要 " + std::to_string(need) +
+               " 字节），文件只有 " + std::to_string(have) +
+               " 字节 —— 段不完整（写侧崩溃或旧版本残留），请让业务重新创建";
+      }
+      return false;
+    }
+  }
   out->fd = fd;
   out->map = p;
   out->map_size = (size_t)st.st_size;

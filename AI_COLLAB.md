@@ -9901,3 +9901,49 @@ standalone/config:  独立可构建，91 断言全过
 主项目 ctest:       65 / 65
 ```
 
+
+## 2026-10-18 15:4x — 加固第 1 轮：probe 共享内存的两处越界（内存安全）
+
+### 真问题 1：复用 ring 时按"本次请求容量"映射，槽位却按"头部容量"算 → 写越界
+
+`stratum_probe_open()` 复用已存在的段时，代码注释写着"沿用它的容量"，但
+`mmap` 长度仍是本次请求算出的 `need`。段创建者容量更大时
+（业务与读取器用不同的 `STRATUM_PROBE_CAPACITY`，或默认值改小过），
+`g_records[seq % hdr->capacity]` 立刻越过映射。
+
+**证据（修复前）**
+- 手工复现：容量 1024 建段 → 关闭 → 容量 2 重开 → 写 100 条 → `EXIT=139`（SIGSEGV）
+- 新增 `tests/unit/test_probe_ring_reuse.cc`：修复前整条用例 SIGSEGV（rc=139），
+  修复后 203 条全部写入、历史 3 条仍在
+
+**修法**（`src/src/probe/probe.c`）
+- 复用分支用 `stratum_ring_bytes(hdr->capacity)` 计算真实长度；
+- 文件长度不足（写侧崩溃/外部清理）→ 返回 -6 拒绝，避免按头部容量映射后 SIGBUS；
+- 真实长度大于本次请求 → 重新 mmap 到真实长度，`g_map_size` 同步。
+
+### 真问题 2：读取器只校验 magic/version/record_size，不校验 capacity 与文件长度
+
+`stratum probe` 用 `last_seq % cap` 定位记录。头部声称 1M 条、文件只有 4KB 时，
+读取器直接越界读 —— 一个"查数据的诊断工具"被截断的 ring 打成 SIGSEGV，
+而不是报"这个 ring 不完整"。
+
+**证据（修复前）**
+- 构造 capacity=1<<20 / 文件 4KB / committed=200000 的假 ring：
+  `stratum probe <shm> --once --dry-run` 实测 rc=139（SIGSEGV）
+- 新增 `tests/integration/test_probe_corrupt_ring.cc`：修复前断言 `actual=139 expect=6`；
+  修复后退出码 6（ENV）+ "共享内存长度不足：头部声明 capacity=... 需要 ... 字节"；
+  同文件保留正例（正常 8 条 ring 仍 read_ok=3），防止修复变成"一律拒绝"
+
+**修法**（`src/cli/cmd_probe.cc`）
+- `OpenRingReadOnly()` 在建视图前校验 `capacity != 0` 且
+  `st_size >= stratum_ring_bytes(capacity)`，不满足则带可读原因拒绝。
+
+### ctest
+
+- 基线：65/65
+- 新增 2 个测试文件（3 个用例）→ 67 个 ctest 条目
+- 新用例单独运行：3/3 通过
+- **本轮全量跑出现 2 个失败（test_cli_probe / test_verify_business），复跑单测通过**：
+  经排查是测试基础设施的缺陷（固定 `/dev/shm` 路径 + 固定 DDS domain 43），
+  另一个 worktree 同时跑全量时互相污染 —— 已作为下一轮高优先级修复（见下节）。
+

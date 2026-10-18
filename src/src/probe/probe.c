@@ -166,6 +166,7 @@ int stratum_probe_open(const char* shm_path) {
   }
 
   stratum_ring_header* hdr = (stratum_ring_header*)p;
+  size_t map_size = need;
   if (created || hdr->magic != STRATUM_RING_MAGIC) {
     /* 首次创建：初始化头部。用 memset 保证残留页不带来旧值。 */
     memset(p, 0, need);
@@ -177,19 +178,43 @@ int stratum_probe_open(const char* shm_path) {
     __atomic_store_n(&hdr->committed_seq, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&hdr->enabled, 1, __ATOMIC_RELEASE);
   } else {
-    /* 复用已有段：沿用它的容量（可能与我们算的不同） */
+    /* 复用已有段：**头部记录的 capacity 才是权威值**。 */
     if (hdr->record_size != (uint32_t)rec_size || hdr->capacity == 0) {
       munmap(p, need);
       close(fd);
       g_open_failed = 1;
       return -5;
     }
+    /* 【越界修复】本次请求的容量可能小于段的真实容量（业务与读取器/不同进程
+     * 的 STRATUM_PROBE_CAPACITY 不同，或默认值被改小过）。槽位是按
+     * hdr->capacity 算的，所以映射长度也必须按头部容量算；否则第 10 条起
+     * 就写到映射之外（已实测 SIGSEGV，见 tests/unit/test_probe_ring_reuse.cc）。 */
+    const size_t real_size = stratum_ring_bytes(hdr->capacity);
+    if ((uint64_t)st.st_size < (uint64_t)real_size) {
+      /* 文件被截断（写侧崩溃 / 外部清理）：头部不可信。
+       * 按头部容量映射会越过文件末尾，访问时是 SIGBUS，比拒绝更糟。 */
+      munmap(p, need);
+      close(fd);
+      g_open_failed = 1;
+      return -6;
+    }
+    if (real_size > need) {
+      munmap(p, need);
+      p = mmap(NULL, real_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      if (p == MAP_FAILED) {
+        close(fd);
+        g_open_failed = 1;
+        return -4;
+      }
+      hdr = (stratum_ring_header*)p;
+      map_size = real_size;
+    }
   }
 
   g_fd = fd;
   g_hdr = hdr;
   g_records = (stratum_probe_record*)((char*)p + sizeof(stratum_ring_header));
-  g_map_size = need;
+  g_map_size = map_size;
   g_stats.capacity = g_hdr->capacity;
   return 0;
 }
