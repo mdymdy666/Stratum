@@ -10183,3 +10183,122 @@ writer 的 padding 分支调用 `EmitPhysicalRecord(kLogZeroType, leftover)`，
 `tests/review/test_wal_corruption.cc::BlockTailPaddingDoesNotHideFollowingRecords`
 —— 修复前 count=1 且 Corruption，修复后 count=2 且第二条 key/value 正确。
 全量：ctest 69/69。
+
+---
+
+# 2026-10-18 收尾总结（代码加固 + 测试并发隔离）
+
+## 一、提交一览
+
+| commit | 内容 |
+|---|---|
+| `34f9740` | probe 共享内存两处越界（复用容量不一致 / 读取器不校验头部） |
+| `a6662d1` | 3 个重型测试的并发隔离（路径 pid 后缀 + DDS domain 进程偏移 + 去掉 make_timeline 依赖） |
+| `f53b173` | 30 个测试文件固定路径统一加固 + `tests/support/test_isolation.h` |
+| `c2c739c` | Recorder 校验 `write_batch_size`（0 卡死 / SIZE_MAX terminate） |
+| `70b8e34` | 删除安全：`src/cli/safe_path.h` 四层守卫，io export/import 与 record --overwrite 接入 |
+| `9474bb6` | 测试隔离补漏：又 10 个 `$HOME/stratum_*` 固定目录 + `cli_runner.h` 重定向文件 |
+| `ea9a03d` | LSM v1 WAL 块尾 padding 写坏布局，导致该块之后所有记录不可读 |
+
+全量：**69/69**（基线 65 + 新增 4 个测试目标）。工作区干净，未 push。
+
+## 二、修复的真问题（触发条件 / 复现 / 修法 / 测试）
+
+### 1. probe 复用 ring 时映射小于头部容量 → 写越界 SIGSEGV
+- 触发：先用容量 N 建段，再用更小容量（不同进程/不同 `STRATUM_PROBE_CAPACITY`/默认值改小）打开同一路径；
+  mmap 按本次请求容量，槽位按 `hdr->capacity` 算。
+- 复现：容量 1024 → 关闭 → 容量 2 重开 → 写 100 条 → `EXIT=139`；
+  新增 `test_probe_ring_reuse` 修复前整条用例 SIGSEGV。
+- 修法：复用分支按 `stratum_ring_bytes(hdr->capacity)` 重映射；文件不足时拒绝（避免 SIGBUS）。
+- 测试：`tests/unit/test_probe_ring_reuse.cc`（203 条全写入、历史数据仍在）。
+
+### 2. probe 读取器不校验 capacity 与文件长度 → 读越界 SIGSEGV
+- 触发：被截断/伪造的 ring（写侧崩溃、旧版本残留），头部 capacity 很大、文件很小。
+- 复现：构造 capacity=1M / 文件 4KB / committed=200000，`stratum probe --once --dry-run` → rc=139。
+- 修法：`OpenRingReadOnly()` 校验 `capacity!=0 && st_size >= ring_bytes(capacity)`，返回 ENV(6)。
+- 测试：`tests/integration/test_probe_corrupt_ring.cc`（含正常 ring 正例 read_ok=3）。
+
+### 3. RecorderConfig.write_batch_size 未校验 → 永久卡死 / terminate
+- 触发：0 → WriterLoop 出队条件永不成立；SIZE_MAX（CLI `-1` 经 strtoul）→ `reserve(SIZE_MAX)` 抛 `std::length_error`。
+- 复现：MockBackend 推 1 条 → `received=1 recorded=0 queue=1`，Stop 3 秒不返回；
+  CLI `--write-batch-size -1` → `terminate ... vector::reserve`，rc=134。
+- 修法：`Recorder::Start` 校验 `[1, 1000000]` → `InvalidArgument`；CLI 严格 strtoull + 范围 → USAGE(2)。
+- 测试：`test_recorder_queue.RejectsInvalidWriteBatchSize`、`test_record_cli_errors`（5 个非法值）。
+
+### 4. 删除类命令可被手滑参数删掉任意目录
+- 审计范围：`grep -rn "remove_all|fs::remove|unlink|rmdir" src/cli src/src`。
+- 删除点：`io export --to`、`io import --to`（目标存在时 `fs::remove_all(to)`）、
+  `record --dir --overwrite`（`fs::remove_all(o.dir)`）。`--overwrite --to /` 即删根。
+- 修法：`src/cli/safe_path.h` 四层守卫（字符串 / weakly_canonical 规范化 /
+  **结构白名单** / fail-closed），三个删除点**无条件**调用（不只在 --overwrite 时）。
+  白名单：record=空目录或合法会话（CURRENT）；export=空目录或合法 bundle（MANIFEST.json）；
+  import=空/会话/bundle。规范化比较用**路径组件**，不是字符串前缀（覆盖 `//`、`/./`、
+  `/data/../..`、软链接）。
+- 证据（断言"文件还在"）：
+  - `test_safe_remove`（4 用例）：`/ // /. /.. /tmp/../.. . .. 空串 $HOME cwd cwd祖先 软链接` 全拒绝；
+  - `test_record_cli_errors`：`--overwrite` 指向含 `keep.txt` 的目录 → 2 且文件仍在；
+  - `test_cli_io_doctor.CliIoSafety`：export/import 同上；空目录仍可正常导出。
+
+### 5. LSM v1 WAL 的 block 尾 padding 让后续记录全部不可读（数据丢失）
+- 触发：某条逻辑记录恰好结束在 32KB 块尾前 1~6 字节（剩的空间 < 7 字节 header）。
+- 复现（修复前，直接调 WAL 类）：
+  第一条记录写到 `size_bytes()==32762`，再写一条正常记录，然后 Replay：
+  `ok=0 code=2 msg=Corruption: WAL unknown record type at offset 32762`，`count=1`
+  —— 后一条**完全正常**的记录被丢弃。
+- 根因：writer 在 padding 分支调了 `EmitPhysicalRecord(kLogZeroType, leftover)`，
+  写出"7 字节 header（length=leftover、type=0）+ leftover 字节"，既把文件布局推出
+  块边界 7 字节，又让 Replay 把 `type<1` 判成 Corruption。
+- 修法（对齐 LevelDB）：padding 改为**裸 0 字节**（不写 header）；`Replay` 在每条
+  记录前按 `pos % 32768` 判断块尾剩余，`< header` 就跳到块边界（对旧格式写出的
+  全 0 padding 也能正确跳过，向后兼容）。
+- 测试：`tests/review/test_wal_corruption.cc::BlockTailPaddingDoesNotHideFollowingRecords`
+  （修复前 `count=1` + Corruption，修复后 `count=2` 且内容正确）。
+
+## 三、测试基础设施（并发隔离）
+
+两份全量 ctest 同时跑会互相污染：固定 `/tmp`、`/dev/shm`、`$HOME/stratum_*` 路径，
+以及固定 DDS domain（33~37 / 43~47）。修法：
+- `UniqueSuffix()` = `<pid>_<进程内计数>`；40+ 个测试的路径全部进程唯一；
+- `tests/support/test_isolation.h`（domain base 60，避开旧版本测试的固定域）；
+- `tests/cli_runner.h` 的 RunSplit 重定向文件进程唯一；
+- `test_cli_io_doctor` 去掉对 `build/tools/make_timeline` 的依赖（该工具无源码、不在 CMake，
+  fresh worktree 必挂），改用 TimelineImplV2 造会话。
+
+**刻意未改**：
+- `test_probe_cli_errors` 的路径参数是"故意不存在"的字符串，两进程都不创建 → 无需改；
+- `test_diff` 的 `/tmp/absent_<pid>_*` 本来就 pid 唯一 → 无需改。
+
+## 四、发现但未修（附原因）
+
+1. **LSM v1 WAL 的 `at_file_end` 分支恒真**（不在生产路径：`LsmEngine` 仅被测试使用，
+   生产是 `lsm_v2` + LSMengine）：`Replay` 里 `pos + header + length > size` 的分支内
+   又用 `>=` 判断"是否在文件末尾"，于是"块内部长度损坏"这条路径永远走不到 ——
+   损坏的长度字段被当成正常截断静默丢弃后续数据。
+   未修原因：修它需要按 block 语义重写判断，而"截断=正常结束"的容错语义有测试覆盖
+   （`TruncatedTailIsNormalEofNotCorruption`），改动需同时调整该用例，风险与收益不成比例。
+2. **`cmd_query --stream` 不是真流式**：`DoExport` 先把整个时间范围读进 `std::vector<Event>`
+   再做 limit/offset，内存峰值 = 全量。修它需要 Query/Timeline/StratumDB 三层加 limit 或
+   增量回调，属跨层 API 改动；未在时限内动。
+3. **`Sink::Print` 固定 4096 字节缓冲**（`cmd_query.cc`）：`--decode` 的 JSON 值超过 4096
+   会被静默截断，输出非法 JSON。修法简单（两段式 vsnprintf），但需要能构造大 decoded 值的测试，
+   本轮未做。
+4. **`prune` / `doctor --recover` / `ctl` 未接删除守卫**：已核实它们不遍历删除目录
+   （prune 只做 DB DeleteRange；doctor/ctl 只截断 lock 文件），当前无"删目录"风险。
+   若将来加入目录删除，必须接 `IsSafeToRemove`。
+
+## 五、验收证据
+
+```
+$ ctest --test-dir build -j1
+100% tests passed, 0 tests failed out of 69
+
+$ # 同时起两份全量 ctest（路径/进程名/domain 规则完全相同，严于两个 worktree）
+$ ctest --test-dir build -j4 > a.log 2>&1 &
+$ ctest --test-dir build -j4 > b.log 2>&1 &
+$ wait
+#1: 100% tests passed, 0 tests failed out of 69
+#2: 100% tests passed, 0 tests failed out of 69
+```
+
+注：并发验证中途确实抓到过遗漏（`test_diff` / `test_diff_symmetry` 双份同时失败），
+补漏后重跑才全绿 —— 这条验收标准本身证明是必要的。
