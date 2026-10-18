@@ -10069,6 +10069,29 @@ worktree 并提交。真实路径 `/UserData/CodexWorkSpace/Stratum-merge` 一�
 > **凡是"用户给的路径/数值会进入删除或算术运算"的地方，都要有一个不依赖业务假设的兜底。**
 > 兜底本身要有测试，而且测试要在"兜底失效"时仍然安全（如上面的不带 `--overwrite`）。
 
+#### 安全阀的通用原则：白名单 > 黑名单（这一条希望 main 上也落地）
+
+删除操作的安全判据不应是"禁掉危险路径"（黑名单，会漏 —— `--to /` 那个洞就是漏的一条），
+而应是"只允许删除**我认识的结构**"（白名单，攻击面可枚举）：
+
+> 例：merge 只写会话 → `!LooksLikeSession(to)` 就拒绝，不管 `to` 是什么。
+
+黑名单是"每想到一个危险路径就加一条"，想漏一个就出洞（而且它要覆盖的命令越多，漏的概率越高）；
+白名单把攻击面从"无穷多的危险路径"收缩到"会话目录格式"这一个可枚举集合，
+而且**不依赖前面几层（规范化 / 前缀比较）的正确性** —— 就算 `weakly_canonical` 有 bug、
+大小写折叠有问题，结构守卫仍然拦得住。这才是兜底该有的样子。
+
+这条原则不只在 merge 成立：`prune`（删时间范围）、`io import`（覆盖目标）、
+`record --overwrite`（清空目录）都适用。**先问"我认识这个结构吗"，再问"这个路径危险吗"。**
+
+#### 一条关于 `weakly_canonical` 的前提（写给未来改代码的人）
+
+`weakly_canonical` 对**不存在的路径**是按字面拼回的（不解析不存在的部分）。
+在当前实现里这没关系：不存在的目标不会被删除。
+**但如果将来加"先创建、失败再删除"的逻辑，这个前提就破了** ——
+创建后再规范化会得到真实路径，而创建前用规范化结果做过的判断可能对不上。
+
+
 #### 安全阀 3 · `--overwrite` 只清空**会话目录**（结构守卫）
 
 * 审计结果：`cmd_merge.cc` 里只有**一处**删除调用（`fs::remove_all(to)`），
@@ -10098,14 +10121,17 @@ worktree 并提交。真实路径 `/UserData/CodexWorkSpace/Stratum-merge` 一�
 
 ```
 worktree: /UserData/CodexWorkSpace/Stratum-merge（分支 feature/session-merge）
-提交:     abd1df1 docs/16 裁决
+提交:     abd1df1 docs/16 三个裁决
           → 3dc4f21 实现 + 10 用例
           → ff5b00c 文档补充（50ms 例子 / payload 1 字节风险）
           → a098fae 随机不变量用例
           → a039953 --help + table 断言 + `--help` 退出码修正
-单用例:   ctest -R test_merge 通过（12 个用例）
-全量:     66/66 通过（214s，独占跑，实测于 3dc4f21/a098fae 一线；
-          之后只改 help 分支与测试断言，定向复验 test_merge / test_cli_runner /
-          test_stdout_purity / test_cli_io_doctor 4/4 通过）
-push:     未执行
+          → 6f1ef0c 偏差告警两级（notice/warning）+ --skew-warn
+          → 33595ee 安全加固（根目录 / offset 溢出）
+          → ae8b153 / bd75f54 / 10af5e8 文档精确化 + 安全阀一节
+          → e947c65 结构守卫（--overwrite 只清空会话目录）
+单用例:   ctest -R test_merge 通过（**12 个用例** = 11 场景 + 1 随机不变量；repeat x5 稳定）
+全量:     **66/66 通过（216s，并发跑：main 的新版全量测试同时在跑，两边均绿）**
+          最终为 66 个 ctest 条目（基线 65 + test_merge 1），无下降
+push:     未执行（按约定由主控在 Windows 侧统一推送）
 ```
