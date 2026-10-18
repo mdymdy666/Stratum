@@ -426,14 +426,14 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 | `sources[].events` | 该源**原有**条数 |
 | `sources[].contributed` | 该源实际写进目标的条数（= events − duplicates） |
 | `sources[].origin_ns` | 源自己最早事件的时刻（未加 offset）；与 `offset_ns` 相加就是它在合并轴上的起点 |
-| `sources[].offset_ns` | **实际应用**的偏移（含 `--offset` 与时间戳钳制前的值） |
+| `sources[].offset_ns` | **实际应用**的偏移（有符号纳秒；`--offset` 解析后的值，未做任何自动校正） |
 | `fallback_to_reception` | source 时间戳无效（== 0）而改用 reception 的条数；>0 说明源数据元信息不全 |
 | `clamped_timestamps` | `source + offset <= 0` 被钳到 1ns 的条数；>0 说明偏移给大了 |
 | `topics[].sources` | 该 topic 出现在几个源里（**覆盖度**，不是事件来源） |
 | `dedupe.conflicts` | 同名同刻不同内容的跨源事件数（两条都保留） |
 | `alignment.skew.*` | 观测到的"同 payload 不同时刻"的差；**不是判定**（§二） |
-| `skew.level` | `none` / `notice`（1ms < 幅度 ≤ 阈值，只记录）/ `warning`（> 阈值，退出码 5） |
-| `skew.threshold_ns` | 本次使用的阈值（默认 10ms，可由 `--skew-warn` 改） |
+| `alignment.skew.level` | `none` / `notice`（1ms < 幅度 ≤ 阈值，只记录）/ `warning`（> 阈值，退出码 5） |
+| `alignment.skew.threshold_ns` | 本次使用的阈值（默认 10ms，可由 `--skew-warn` 改） |
 | `notices[]` | 不影响退出码的提示（目前只有 `clock_skew_notice`） |
 
 ### 退出码
@@ -442,7 +442,7 @@ stratum [--format table|json] session merge <会话1> <会话2> [...] --to <目�
 |---|---|
 | **0** | 合并成功，无告警 |
 | 1 | ERROR（写目标失败） |
-| 2 | USAGE（参数不足 / 目标与源相同 / 选项非法） |
+| 2 | USAGE（参数不足 / 目标与源相同或为根目录 / 选项非法） |
 | 3 | EXISTS（目标已存在且非空，未给 `--overwrite`） |
 | **5** | **PARTIAL**：合并完成，但**有冲突，或偏差幅度超过阈值（默认 10ms）** |
 | 6 | ENV（源会话打不开 / 目标目录不可写） |
