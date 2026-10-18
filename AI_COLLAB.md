@@ -10536,3 +10536,153 @@ worktree: /UserData/CodexWorkSpace/Stratum-merge（分支 feature/session-merge�
           最终为 66 个 ctest 条目（基线 65 + test_merge 1），无下降
 push:     未执行（按约定由主控在 Windows 侧统一推送）
 ```
+
+---
+
+## 2026-10-18 | 双 agent 并行：代码加固 + 会话合并（ctest 65 → 70）
+
+### 一、最终数字
+
+```
+全量 ctest:  65 → 70   （100% passed, -j1 串行，合并后实测）
+提交:        128（含 1 个 merge commit）
+本地 == remote: 是
+```
+
+### 二、两条并行线（用 git worktree 隔离，避免互相切分支）
+
+| 线 | 目录 | 分支 | 产出 |
+|---|---|---|---|
+| 代码加固 | `/UserData/CodexWorkSpace/Stratum` | main | 8 个提交，6 个真 bug |
+| 会话合并 | `/UserData/CodexWorkSpace/Stratum-merge` | feature/session-merge | 14 个提交，docs/16 + 实现 + 12 用例 |
+
+### 三、加固线：6 个真 bug（每个都有"修复前失败"的证据）
+
+| # | 问题 | 修复前证据 | 回归测试 |
+|---|---|---|---|
+| 1 | probe 复用 ring 时按"本次请求容量"映射、槽位按"头部容量"算 → 写越界 | 1024 建段→2 重开→写 100 条：**SIGSEGV(139)** | `test_probe_ring_reuse` |
+| 2 | probe 读取器不校验 `capacity` 与文件长度 → 读越界 | 伪造 1M 容量/4KB 文件：`probe --once` **rc=139** | `test_probe_corrupt_ring` |
+| 3 | `write_batch_size` 未校验 | `0`：received=1 recorded=0 queue=1，**Stop 3s 不返回**；`-1`：reserve(SIZE_MAX) → **terminate(134)** | `test_recorder_queue` + `test_record_cli_errors` |
+| 4 | `io export/import --to`、`record --dir --overwrite` 可删任意目录 | `--to /` 直接走到 `remove_all("/")` | `test_safe_remove`(4) + `CliIoSafety` + `OverwriteRefuses...` |
+| 5 | **LSM v1 WAL 块尾 padding 写坏布局** | `Corruption: unknown record type at offset 32762`，**该块之后所有记录全丢** | `BlockTailPaddingDoesNotHideFollowingRecords` |
+| 6 | 测试并发污染（固定路径 + 固定 DDS domain） | 双份全量同跑时 `test_cli_probe`/`test_verify_business` 随机失败、`test_diff` 双份同时失败 | 40+ 文件改造 + `tests/support/test_isolation.h` |
+
+**第 5 个最隐蔽**：记录结束在块尾前 1~6 字节时，Replay 报 `unknown record type`，
+后续正常记录全部不可读。修复前 count=1、修复后 count=2 —— 这个对比就是硬证据。
+
+### 四、删除安全：四层守卫（`src/cli/safe_path.h`）
+
+```
+第 1 层  字符串层：非空、非 /、非 .、非 ..
+第 2 层  weakly_canonical 规范化 + 路径组件比较（覆盖 //、/./、/data/../..、软链接）
+第 3 层  ★ 结构白名单：record 只认空目录/会话；export 只认空目录/bundle；import 认空/会话/bundle
+第 4 层  无结构判定则 fail-closed（拒绝，不删）
+```
+
+**第 3 层是这次最重要的设计洞察**（来自会话合并线，我转给了加固线）：
+
+> 删除操作的安全判据不应是"禁掉危险路径"（**黑名单，会漏**），
+> 而应是"只允许删除我认识的结构"（**白名单，攻击面可枚举**）。
+>
+> `merge --to /` 那个洞，本质就是黑名单漏了根目录这一条。
+
+而且第 3 层**不依赖前两层的正确性** —— 就算 `weakly_canonical` 有 bug、就算大小写折叠有问题，它仍然拦得住。**这才是兜底该有的样子。**
+
+### 五、会话合并线
+
+**`docs/16-session-merge.md`（631 行，先裁决再实现）**
+
+| 问题 | 裁决 |
+|---|---|
+| 用哪个时钟 | `source_timestamp_ns` + 显式 `--offset`，**按绝对值合并**；reception 只在 source 无效时兜底。不做重定基、不自动校正 |
+| 同名 topic | **合成一个、名字不变**；拒绝按来源加前缀（会让 `_probe.` 分类、diff 配对、现有查询脚本同时失效）；明确不提供 `--probe-prefix` |
+| 去重键 | `(topic, 合并后 source_ts, payload_hash)`，**仅跨源**；`seq` 是录制器本地分配，不能跨会话用 |
+
+**两个被评审逼出来的设计**：
+
+**① 钟差告警改两级 + 可配**
+```
+magnitude > 阈值（默认 10ms）  → warning  → 退出 5
+1ms < magnitude ≤ 阈值         → notice   → 退出码不变（写 notices[]）
+magnitude ≤ 1ms                → none
+```
+关键是把**「数据可能已失真」与「要不要让 CI 红」正交化**：
+去重是否生效看 `dedupe.duplicates_removed`，**不看退出码**。
+（5ms 偏差已足以让去重失效、条数翻倍，但默认阈值下仍是 notice/退出 0。）
+CI 门禁不该因为"跨机钟差 3ms"天天红；但看报告的人必须知道"这次去重没生效"。
+
+**② 钟差阈值用样本位置换算，不是拍一个数**
+| 数据周期 | 1ms 偏差 | 10ms 偏差 |
+|---|---|---|
+| 1kHz（常见 IMU） | 错 **1 条** | 错 **10 条** |
+| 100Hz | 半个周期，相邻样本可能颠倒 | 整整错 **1 条** |
+| 10Hz | 无感 | 1/10 周期，无感 |
+
+10ms 的含义 = "在对时序最敏感的 1kHz 数据上已错位 10 条，而在 10Hz 慢数据上仍无感"。
+**读者能自己判断这个阈值对他的场景够不够。**
+
+### 六、★ 并发测试隔离（本轮的基础设施成果）
+
+`tests/support/test_isolation.h`：
+
+```cpp
+UniqueSuffix()  →  <pid>_<进程内计数>
+   为什么用计数而不是只用 pid：同一进程内同一个 tag 被调用多次（如随机用例循环）
+   也必须落不同目录，否则会自己删自己。
+
+TestDomain(slot) →  base(60) + (pid%20)*8 + slot
+   base 刻意避开历史测试用过的 33~37 / 43~47 ——
+   这样即使另一个 worktree 跑的是**旧版本测试**（固定 domain），也不会撞域。
+   可用 STRATUM_TEST_DOMAIN_BASE 覆盖。
+```
+
+**验收方式（比常规更严格）**：同一 worktree 同时起**两份全量 ctest**（路径前缀完全相同、
+只有 pid 区分），比两个 worktree 更难通过。
+
+实测：
+```
+串行 ctest -j1:        69/69
+并发两份 ctest -j4:    各 69/69
+并发验证中途真抓到遗漏：test_diff / test_diff_symmetry 双份同时失败 → 补漏后才全绿
+```
+
+**"中途真抓到过遗漏"是最有价值的一句** —— 说明这个验证方法真能发现问题，不是走过场。
+
+### 七、未完成 / 已知限制（逐条列出）
+
+**加固线发现但未修（4 项，AI_COLLAB 有完整原因）**
+
+| # | 问题 | 为什么不修 |
+|---|---|---|
+| 1 | LSM v1 `Replay` 的 `at_file_end` 分支恒真（`>` 分支内用 `>=`）：块内长度损坏被当正常截断 | 修它要连"截断=正常"的既有语义一起改，风险/收益不划算 |
+| 2 | `cmd_query --stream` **不是真流式**（先全量入 vector 再 limit），内存峰值=全量 | 需 Query/Timeline/StratumDB 三层 API 改动 |
+| 3 | `Sink::Print` 固定 4096 缓冲：`--decode` 大 JSON 会被**静默截断成非法 JSON** | 需构造大 decoded 值的测试 |
+| 4 | 部分测试仍用 `/tmp`（已加 pid 隔离，未迁 `$HOME`） | 与并发隔离无关，迁移面大 |
+
+**第 2、3 条值得下一轮优先处理** —— 一个是内存峰值，一个是静默产出非法 JSON。
+
+**会话合并线的已知局限（10 条）**
+
+不做近似时间去重、不做增量合并、不做相对重定基、不改 topic 名、不保留逐事件来源、
+`--offset` 最小 1ms、不做 CDR 剥离/模糊比对、不能反推源质量、
+大内存（全量读入排序，百万级需数 GB，不做外部排序）、不能在源被写入时安全合并。
+
+**本轮我自己犯的两个错误（记录在案）**
+
+1. **给的安全守卫判据是黑名单**（非 `/`、非 `.`、非 `..`、非 `$HOME`、深度 ≥ 2）。
+   被会话合并线用"结构白名单"推翻，而"深度 ≥ 2"这条被证明是错的：
+   **深度挡不住 `$HOME`（它很深），却能误伤合法的 `--to /merged`**。
+   **用层数当安全判据和危险程度无关。**
+2. **合并 `AI_COLLAB.md` 时用 Python `write_text`，把行尾从 CRLF 改成了 LF**。
+   内容没丢（`diff --strip-trailing-cr` 相同），但第一次校验报"不是前缀"，我差点误判成内容丢失。
+   **比较/写入文本文件时，行尾是一个必须显式处理的维度。**
+
+**一个诚实说明：`AI_COLLAB.md` 合并的实现取舍**
+
+feature 分支对 `AI_COLLAB.md` 的旧内容做过一次**等量改写**（244 行，修乱码/格式）。
+合并时我用"公共前缀法"拼接（`main 全文 + feature 净新增 234 行`），
+所以 **feature 对旧内容的 244 行改写未被采纳，保留的是 main 的原版**。
+
+判断：可接受。新记录（234 行）完整保留，丢的是"对旧记录的改写"，
+且 main 的版本更新、保留它更安全。**但这意味着这次合并不是逐字节完美的三方合并。**
+
