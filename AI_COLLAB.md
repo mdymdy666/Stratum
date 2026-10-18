@@ -10107,3 +10107,42 @@ $ wait
 - `prune` / `doctor --recover` / `ctl` 目前不遍历删除目录（已按上表核实）。
   若将来在这些命令里加入删除目录的逻辑，**必须**接入 `IsSafeToRemove` + 对应结构白名单。
 - 守卫只保护"删除目标"，不保护"源"（源路径只读，不需要）。
+
+## 2026-10-18 17:0x — 并发验收当场抓到遗漏：又 10 个测试用固定 $HOME 目录
+
+### 发现方式（重要）
+
+上一轮修完后先跑了双份全量 ctest，`test_diff` / `test_diff_symmetry` 两份
+**同时失败**（单跑全过）。失败是 `MakeSession` 打不开会话/CLI 返回 ENV(6)，
+根因是 `TempDir(tag)` 仍是 `$HOME/stratum_dd_<tag>` 这类**固定目录** ——
+第一轮 sweep 只覆盖了 `/tmp/stratum_*` 与 `/dev/shm/stratum_*`，漏了
+`$HOME/stratum_*` 这一族。
+
+**这正好验证了"必须实际双跑"这条验收标准**：只看代码/只跑一遍，这个遗漏
+不会被发现。
+
+### 本轮修的文件（10 个测试 + 1 个共享头）
+
+`test_cli_runner.cc`、`test_diff.cc`、`test_diff_edge.cc`、
+`test_diff_symmetry.cc`、`test_io_context.cc`、`test_metrics_business.cc`、
+`test_probe_cli_errors.cc`、`test_probe_status_edge.cc`、
+`test_xcheck_verify_diff.cc`、`test_probe_hot_reload.cc`、`test_probe_instance.cc`
+（两个固定配置目录 `stratum_inst_cfg`/`stratum_inst_cfg2`），
+以及 `tests/cli_runner.h` 的 `RunSplit()` 重定向文件
+（`/tmp/_cli_runner_*.txt` → 带 pid，否则两进程互相覆盖 stdout/stderr）。
+
+### 证据（修复后）
+
+```
+# 同时起两份全量 ctest
+#1: 100% tests passed, 0 tests failed out of 69
+#2: 100% tests passed, 0 tests failed out of 69
+```
+
+### 仍未改（有意）
+
+- `test_probe_cli_errors` 的**路径参数**用的是 `/dev/shm/stratum_missing_*`
+  这类"故意不存在"的字符串（不是它自己的 TempDir）；两个进程都不会创建，
+  不构成冲突。
+- `test_diff` 的 `/tmp/absent_<pid>_*` 本来就 pid 唯一。
+- `test_safe_remove` / `test_record_cli_errors` 是本轮新增，路径已带 pid。

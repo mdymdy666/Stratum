@@ -166,7 +166,7 @@ STRATUM_TEST(ProbeInstance, EnabledFlagIsPerRing) {
 
 STRATUM_TEST(ProbeInstance, SharedConfigFileIsConsistent) {
   const char* home = std::getenv("HOME");
-  const std::string dir = std::string(home ? home : ".") + "/stratum_inst_cfg";
+  const std::string dir = std::string(home ? home : ".") + "/stratum_inst_cfg_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);
@@ -205,7 +205,7 @@ STRATUM_TEST(ProbeInstance, SharedConfigFileIsConsistent) {
 
 STRATUM_TEST(ProbeInstance, IndependentConfigsDoNotInterfere) {
   const char* home = std::getenv("HOME");
-  const std::string dir = std::string(home ? home : ".") + "/stratum_inst_cfg2";
+  const std::string dir = std::string(home ? home : ".") + "/stratum_inst_cfg2_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(dir, ec);
   fs::create_directories(dir, ec);

@@ -47,6 +47,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unistd.h>
 
 namespace stratum_cli_test {
 
@@ -112,8 +113,11 @@ struct SplitResult {
 
 inline SplitResult RunSplit(const std::string& cmd) {
   SplitResult r;
-  const std::string tmp_out = "/tmp/_cli_runner_out.txt";
-  const std::string tmp_err = "/tmp/_cli_runner_err.txt";
+  // 【并发隔离】重定向文件必须进程唯一，否则两份测试同时跑会互相覆盖
+  static const std::string tmp_out =
+      std::string("/tmp/_cli_runner_out_") + std::to_string(::getpid()) + ".txt";
+  static const std::string tmp_err =
+      std::string("/tmp/_cli_runner_err_") + std::to_string(::getpid()) + ".txt";
   const std::string full = cmd + " > " + tmp_out + " 2> " + tmp_err;
   const int rc = std::system(full.c_str());
   r.code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;

@@ -27,6 +27,7 @@
 
 #include "stratum/probe/probe.h"
 #include "test_framework.h"
+#include "test_isolation.h"
 
 namespace fs = std::filesystem;
 
@@ -56,7 +57,7 @@ CliResult RunCli(const std::string& cmd) {
 
 std::string TempDir(const char* tag) {
   const char* home = std::getenv("HOME");
-  const std::string d = std::string(home ? home : ".") + "/stratum_se_" + tag;
+  const std::string d = std::string(home ? home : ".") + "/stratum_se_" + tag + "_" + UniqueSuffix();
   std::error_code ec;
   fs::remove_all(d, ec);
   fs::create_directories(d, ec);
