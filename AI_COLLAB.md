@@ -10022,8 +10022,14 @@ worktree 并提交。真实路径 `/UserData/CodexWorkSpace/Stratum-merge` 一�
 
 ```
 worktree: /UserData/CodexWorkSpace/Stratum-merge（分支 feature/session-merge）
-提交:     docs/16 裁决 → 实现+10 测试 → 文档补充（50ms 例子 / payload 1 字节风险）
-单用例:   ctest -R test_merge 通过（1.53s）
-全量:     待主控放行（并发冲突的隔离由另一个 agent 修）
+提交:     abd1df1 docs/16 裁决
+          → 3dc4f21 实现 + 10 用例
+          → ff5b00c 文档补充（50ms 例子 / payload 1 字节风险）
+          → a098fae 随机不变量用例
+          → a039953 --help + table 断言 + `--help` 退出码修正
+单用例:   ctest -R test_merge 通过（11 个用例）
+全量:     66/66 通过（214s，独占跑，实测于 3dc4f21/a098fae 一线；
+          之后只改 help 分支与测试断言，定向复验 test_merge / test_cli_runner /
+          test_stdout_purity / test_cli_io_doctor 4/4 通过）
 push:     未执行
 ```
