@@ -290,3 +290,8 @@ set_tests_properties(test_meta_codec PROPERTIES TIMEOUT 60)
 # 0 表示「不限」而非「零上限」；工厂 Create 必须返回**正确类型**（dynamic_cast 验证）
 stratum_add_test(test_split_policy_factory unit/test_split_policy_factory.cc unit core)
 set_tests_properties(test_split_policy_factory PROPERTIES TIMEOUT 60)
+
+# Status 分类判定（docs/06 缺口 #6）：
+# 12 个工厂方法 × 5 个判定方法的完整对应表；另 7 个 code 无判定方法（设计选择，显式记录）
+stratum_add_test(test_status_predicates unit/test_status.cc unit core)
+set_tests_properties(test_status_predicates PROPERTIES TIMEOUT 60)
