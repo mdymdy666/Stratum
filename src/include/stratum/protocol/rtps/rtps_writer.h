@@ -202,6 +202,39 @@ class RtpsWriter {
   Status Publish(const std::string& topic_name, const std::string& type_name,
                  const std::string& payload, TimestampNs source_ts_ns);
 
+  // 批量发布的一条样本。
+  struct BatchSample {
+    std::string topic_name;
+    std::string type_name;
+    std::string payload;
+    TimestampNs source_ts_ns = 0;
+  };
+
+  // 一次发送多条样本（**一个 RTPS Message 装多个 DATA 子消息**，一次 sendto/peer）。
+  //
+  // 【省的是什么】Message Header(20) + INFO_DST(16) 只付一次，而不是每条一次：
+  //     单发 N 条: N × (72 + payload)
+  //     批量 N 条: 36 + N × (36 + payload)
+  //   实测（payload=24B、N=10、含 IP/UDP）：1080 → 648 字节，省 40%；
+  //   sendto 次数 10 → 1。
+  //
+  // 【为什么不同 topic 也能合】每个 DATA 子消息自带 writerId(4B) 与 SN(8B)，
+  // 对端按 writerId 分发，不要求整个 Message 属于同一个 writer。
+  //
+  // 【三条必须遵守的语义（都有实际踩坑来源）】
+  //  ① **SEDP 公告不被绕过**：逐 topic 检查 announced_，首次见到的先补公告。
+  //     漏了它 → 对端发现不了 writer → 数据全发到 metatraffic 端口 →
+  //     对端收 0 条、两端无报错（docs/01 §1.1）。
+  //  ② **SN per-writer**：每条各自 NextSnFor(自己的 writer_entity)。
+  //     整批共用一个 SN 会让同 writer 的 N 条被判重复、对端只收 1 条。
+  //  ③ **整批失败而不是部分成功**：任一条构造失败就返回错误，不发半批。
+  //     部分成功会让"已发布条数"与"实际发出条数"对不上 ——
+  //     而这是最难查的静默错误，宁可让调用方看到明确的失败。
+  //
+  // 【与 Publish 的关系】Publish 完全保留原样（大量测试依赖单发路径）。
+  // 批量是新增路径，两条路径共用同一个 BuildDataPacket 系列，不会分叉。
+  Status PublishBatch(const std::vector<BatchSample>& samples);
+
   // 是否已有对端 reader 完成匹配（收到过它的 SEDP Subscription 与 ACKNACK）。
   //
   // 判据用"Subscription + ACKNACK 都到过"：前者说明对端 reader 存在，
@@ -237,6 +270,11 @@ class RtpsWriter {
     uint64_t heartbeats_received = 0;
     uint64_t acknacks_sent = 0;
     uint64_t peers_learned = 0;
+    // 批量发送的次数（一个报文里包含 >=2 条样本才算一次批量）。
+    // 与 batched_samples 一起看：batches=100、batched_samples=1000 意味着
+    // 平均每批 10 条 —— 这就是"省了多少 Message Header"的直接度量。
+    uint64_t batches_sent = 0;
+    uint64_t batched_samples = 0;
   };
   Stats GetStats() const;
 
@@ -382,6 +420,9 @@ class RtpsWriter {
   std::atomic<uint64_t> st_sedp_sub_{0};
   std::atomic<uint64_t> st_readers_{0};
   std::atomic<uint64_t> st_data_sent_{0};
+  // 批量统计：batches（>=2 条的批次次数）与 batched_samples（这些批次里的样本数）
+  std::atomic<uint64_t> st_batches_{0};
+  std::atomic<uint64_t> st_batched_samples_{0};
   std::atomic<uint64_t> st_window_timeouts_{0};
   std::atomic<uint64_t> st_window_bytes_waits_{0};   // 流控窗口等待超时次数（对端迟迟不 ACK）
   std::atomic<uint64_t> st_heartbeats_{0};

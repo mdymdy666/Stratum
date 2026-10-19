@@ -561,4 +561,38 @@ STRATUM_TEST(RtpsUsage, BackendCapabilitiesAreHonest) {
             << " multicast=" << (caps.supports_multicast ? 1 : 0) << std::endl;
 }
 
+// ---------------------------------------------------------------------------
+// PublishBatch 的契约：未 Open 时必须失败，且"空批次"不能掩盖未 Open
+//
+// 完整批量路径需要真实 socket 与对端（属端到端验证，留在 player 接入那一轮）。
+// 这里锁住两条最容易写错的判定顺序。
+// ---------------------------------------------------------------------------
+STRATUM_TEST(RtpsUsage, PublishBatchRequiresOpen) {
+  stratum::protocol::rtps::RtpsWriter w;   // 故意不 Open
+
+  std::vector<stratum::protocol::rtps::RtpsWriter::BatchSample> batch(2);
+  batch[0].topic_name = "hello_world_topic";
+  batch[0].type_name = "HelloWorld";
+  batch[0].payload = "AAAA";
+  batch[0].source_ts_ns = 1700000000000000000LL;
+  batch[1].topic_name = "hello_world_topic";
+  batch[1].type_name = "HelloWorld";
+  batch[1].payload = "BBBB";
+  batch[1].source_ts_ns = 1700000000001000000LL;
+
+  const auto st = w.PublishBatch(batch);
+  STRATUM_CHECK_TRUE(!st.ok());
+  // 错误信息要能指向原因（而不是一个空 Status）
+  STRATUM_CHECK_TRUE(st.ToString().find("Open") != std::string::npos ||
+                     st.ToString().find("打开") != std::string::npos);
+  std::cout << "      [契约] 未 Open + 2 条 → " << st.ToString() << std::endl;
+
+  // ★ 关键：空批次在未 Open 时也必须失败。
+  // 若实现先判 samples.empty() 返回 OK，就掩盖了"writer 没打开"这个事实，
+  // 调用方会以为"反正没数据，成功"。
+  const auto st_empty = w.PublishBatch({});
+  STRATUM_CHECK_TRUE(!st_empty.ok());
+  std::cout << "      [契约] 未 Open + 空批次 → " << st_empty.ToString() << std::endl;
+}
+
 STRATUM_TEST_MAIN()

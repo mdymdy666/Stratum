@@ -1465,6 +1465,122 @@ Status RtpsWriter::Publish(const std::string& topic_name,
   return Status::OK();
 }
 
+// ---------------------------------------------------------------------------
+// 批量发布（语义见头文件：SEDP 不被绕过 / SN per-writer / 整批失败）
+// ---------------------------------------------------------------------------
+Status RtpsWriter::PublishBatch(const std::vector<BatchSample>& samples) {
+  if (fd_tx_ < 0) return Status::InvalidArgument("RtpsWriter 尚未 Open");
+  // 空批次是合法的 no-op：调用方攒完发现没数据时不该报错
+  if (samples.empty()) return Status::OK();
+
+  for (const auto& s : samples) {
+    if (s.topic_name.empty()) {
+      return Status::InvalidArgument("批量里有样本的话题名为空");
+    }
+  }
+
+  // --- ① SEDP 公告：逐 topic 检查，缺的先补 ---
+  // 【为什么必须在这里做】批量路径不走 Publish，若不补公告，
+  // 对端永远发现不了这个 writer → 数据全发到 metatraffic 端口 →
+  // 对端收 0 条且两端无报错（docs/01 §1.1 的原样复现）。
+  {
+    std::vector<std::pair<std::string, std::string>> to_announce;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (const auto& s : samples) {
+        const std::string key = s.topic_name + "|" + s.type_name;
+        if (announced_.find(key) == announced_.end()) {
+          announced_[key] = std::make_pair(s.topic_name, s.type_name);
+          to_announce.push_back({s.topic_name, s.type_name});
+        }
+      }
+    }
+    for (const auto& ta : to_announce) {
+      const auto pub = BuildPublication(ta.first, ta.second);
+      if (pub.empty()) {
+        last_error_ = "SEDP Publication 构造失败（topic=\"" + ta.first +
+                      "\" type=\"" + ta.second + "\"）";
+        st_pub_build_failed_.fetch_add(1, std::memory_order_relaxed);
+        std::fprintf(stderr, "[writer] %s\n", last_error_.c_str());
+        std::fflush(stderr);
+        return Status::InvalidArgument(last_error_);
+      }
+      std::vector<Peer> peers;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        peers = peers_;
+      }
+      for (const Peer& peer : peers) {
+        const sockaddr_in sa = ToSockaddr(peer.meta);
+        ::sendto(fd_tx_, pub.data(), pub.size(), 0,
+                 reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
+      }
+      st_pubs_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
+
+  // --- ② 逐条分配 SN，组装 DataPacketParams ---
+  std::vector<packet::DataPacketParams> dpps;
+  dpps.reserve(samples.size());
+  size_t total_bytes = 0;
+  for (const auto& s : samples) {
+    // 调试丢包注入：**逐条**决定（与 Publish 的单条语义保持一致）
+    if (ShouldDropForTest()) {
+      st_debug_dropped_.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    packet::DataPacketParams dp;
+    std::memcpy(dp.prefix, my_prefix_, 12);
+    dp.writer_entity = WriterEntityFor(s.topic_name, s.type_name);
+    // ★ SN per-writer：每条各自取号，绝不共用
+    dp.sn = NextSnFor(dp.writer_entity);
+    dp.payload = s.payload;
+    dp.source_ts_ns = s.source_ts_ns;
+    total_bytes += s.payload.size() + 32;
+    dpps.push_back(std::move(dp));
+  }
+  if (dpps.empty()) return Status::OK();   // 全被调试注入丢掉了
+
+  // --- ③ 构造批量报文（整批失败语义）---
+  ThrottleOrWait(total_bytes);
+  const auto pkt = packet::BuildDataPacketBatch(dpps);
+  if (pkt.empty()) {
+    // 【整批失败】任一条超界/整包超总长都会走到这里。
+    // 不发半批：部分成功会让"已发布条数"与"实际发出条数"对不上。
+    st_pub_build_failed_.fetch_add(1, std::memory_order_relaxed);
+    return Status::InvalidArgument(
+        "批量报文构造失败：某条样本超 RTPS 单子消息上限，或整包超过 60000 字节。"
+        "调用方应拆成更小的批（不支持的样本需要 DATA_FRAG 分片）。");
+  }
+
+  // --- ④ 每个 peer 一次 sendto（这是 syscall 降 N 倍的来源）---
+  std::vector<Peer> peers;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    peers = peers_;
+  }
+  size_t sent = 0;
+  for (const Peer& peer : peers) {
+    const PeerAddress& dst = peer.has_user ? peer.user : peer.meta;
+    const sockaddr_in sa = ToSockaddr(dst);
+    const ssize_t n = ::sendto(fd_tx_, pkt.data(), pkt.size(), 0,
+                               reinterpret_cast<const sockaddr*>(&sa), sizeof(sa));
+    if (n < 0) {
+      st_send_errors_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      ++sent;
+    }
+  }
+
+  st_packets_.fetch_add(sent, std::memory_order_relaxed);
+  st_data_sent_.fetch_add(dpps.size(), std::memory_order_relaxed);
+  if (dpps.size() >= 2) {
+    st_batches_.fetch_add(1, std::memory_order_relaxed);
+    st_batched_samples_.fetch_add(dpps.size(), std::memory_order_relaxed);
+  }
+  return Status::OK();
+}
+
 Status RtpsWriter::WaitForAcknowledgments(uint64_t timeout_ms) {
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(timeout_ms);
@@ -1533,6 +1649,10 @@ RtpsWriter::Stats RtpsWriter::GetStats() const {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     s.peers_learned = peers_.size();
+
+    s.batches_sent = st_batches_.load(std::memory_order_relaxed);
+
+    s.batched_samples = st_batched_samples_.load(std::memory_order_relaxed);
   }
   return s;
 }
