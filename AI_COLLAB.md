@@ -10925,3 +10925,132 @@ python3 tools/check_doc_links.py --links  # 只查断链
 检查工具:    tools/check_doc_links.py（3 条检查，全部通过）
 ```
 
+
+---
+
+## 2026-10-19（最终收尾）| 文档对齐扩到 8 篇 + 测试缺口核对
+
+### 一、本轮新增
+
+**`docs/01` 核对（33 个条目）**
+
+用脚本提取 81 个符号，在 `src/` + `tests/` 里 grep：**27 个条目全部命中（93%）**。
+
+6 个"找不到"里 **5 个是检查器误报**：
+
+| 条目 | 找不到的"符号" | 真相 |
+|---|---|---|
+| 1.5 | `lat_ms` / `DIAG_LATENCY_MS` | 历史脚本的变量名 |
+| 1.6 | `max < p99` | 表达式 |
+| 7.4 | `git init` | 工程记录 |
+| 6.1 | `DomainParticipantListener` | Fast DDS 的类（不在 `src/`） |
+| 6.3 | `OutDatagrams` | Linux 内核统计（`/proc/net/snmp`） |
+
+**只有 7.1 真过时**：修复对象 `stratum_rtps_record` 已不存在（被 `stratum record` 取代）。
+已加标注说明当前实现（`record --dir` 非空默认 `3 EXISTS`，需显式 `--overwrite`，且过四层守卫）。
+
+**`docs/06` 测试缺口核对（7 项）**
+
+| # | 缺口 | 现状 |
+|---|---|---|
+| 1 | `Player` 控制面（`GetProgress`/`IsPlaying`/`RequestStop`） | ❌ 仍缺 |
+| 2 | `Query::GetInfo` + `SessionMetadata` | ✅ 已补（`test_session_metadata.cc`） |
+| 3 | `MetaCodec` | ❌ 仍缺 |
+| 4 | 迭代器 `SeekToFirst`/`SeekForPrev`/`Prev` | ❌ 仍缺（契约测试里 0 次） |
+| 5 | `SplitPolicy` | ❌ 仍缺 |
+| 6 | `Status` 分类判定 | ⚠️ 部分 |
+| 7 | 工厂接口 `Create()` | ❌ 仍缺 |
+
+**结论：7 项里 1 已补、1 部分、5 仍缺** —— 说明这份文档写完之后测试覆盖没有实质变化。
+建议优先级：#1（协作式停止的正确性）与 #4（反向遍历，时间轴场景常用）。
+
+### 二、最终产物清单
+
+**注释（10 个类 + 规范 + 状态机）**
+
+| 产物 | 规模 |
+|---|---|
+| `docs/17-comment-style.md` | 340 行（可执行模板 + 验收清单 + 反例） |
+| `docs/state/recorder.md` | 296 行（状态机转化表，一行一个转化 + 自检版检查器） |
+| `core/recorder.h` | +193 行（`Recorder` / `Query` / `Player` 三个类） |
+| `core/timeline_impl_v2.h` | +101 行（`TimelineImplV2`） |
+| `storage/istorage_engine.h` | +72 行（`IStorageEngine` / `IStorageEngineFactory`） |
+| `storage/lsm/lsm_engine.h` | +70 行（4 个类） |
+
+**文档对齐（8 篇 + 1 报告 + 1 工具）**
+
+| 文档 | 做了什么 |
+|---|---|
+| `--help`（main.cc） | 子命令 5 组 → 14 组；删掉自相矛盾的「尚未实现」 |
+| `docs/07-cli-design.md` | 状态「设计提案，未实现」→ 已实现 + 新增 §0.0 实现状态表 |
+| `docs/08-cli-spec.md` | 新增 §0.0 覆盖范围（它只规定 5 个命令）+ 其余 9 个的规格指针 |
+| `docs/01-resolved-issues.md` | 33 条核对（93% 命中）+ 7.1 标注过时 + 修 1 处断链 |
+| `docs/02-open-issues.md` | 修 1 处断链 |
+| `docs/06-test-gaps.md` | 7 项缺口核对 + 标注现状 |
+| `docs/13/14/15/16` | 核对通过（与实现一致） |
+| `docs/18-doc-alignment-report.md` | 175 行报告 |
+| `tools/check_doc_links.py` | 三条自动检查（断链 / README 索引 / 幽灵命令） |
+
+### 三、三个最有价值的发现
+
+**① `--help` 否认了已存在的能力**
+
+```cpp
+"已实现的子命令:"           ← 只列 5 组（实际 14 组）
+"尚未实现（明确报错）:"      ← 说 play/prune/ctl/io/doctor 没做
+"  play / prune / ctl / io / doctor"   ← 这 5 个全部已实现
+```
+
+两条自相矛盾，且都否认了已存在的能力。**而 `--help` 是新人第一个会看的。**
+
+**② `docs/07` 写着「设计提案，未实现」，而 14 个命令全已实现**
+
+**③ `docs/08` 是「CLI 规格」，但完全没提最近 5 个新功能**
+
+```
+grep -c "stratum diff"        docs/08 → 0
+grep -c "session merge"       docs/08 → 0
+grep -c "business-signals"    docs/08 → 0
+```
+
+而 `--version` 里写着「CLI 规范: docs/08-cli-spec.md」。
+
+### 四、根因：没有"单一数据源"
+
+三处漂移（`--help` 文案 / `docs/07` 状态 / `docs/08` 覆盖范围）**根因相同**：
+**命令列表被手写在了三个地方**，加功能时只改了一个。
+
+**根治建议**（写进 `docs/18`，本轮未做）：
+在 `cli_common.h` 建一个 `kCommandRegistry[]`，`--help` 与文档的命令表都从它生成 ——
+这样加命令时漏改一处会被编译期或测试抓到。
+
+### 五、未完成（明确列出）
+
+**注释**
+
+| 范围 | 状态 |
+|---|---|
+| `core/` 4 类、`storage/` 6 类 | ✅ 完成（10 个） |
+| `probe/`（5 类） | ⬜ 跳过 —— `probe.h` 已有需求编号 + 5 条设计要点 + 用法示例，超出规范要求 |
+| `config/`（4 类） | ⬜ 未做 |
+| `types/`（7 类） | ⬜ 未做 |
+| `cli/cmd_*.cc`（18 个文件） | ⬜ 未做（不是类，只需函数级 step 分解） |
+| 其余 `storage/` 类 | ⬜ 未做 |
+
+**文档对齐**
+
+| 文档 | 状态 |
+|---|---|
+| `docs/01` / `02` / `06` / `07` / `08` + `13~16` | ✅ 已核对/修正（8 篇） |
+| `docs/03-verification-matrix.md`（125 行） | ⬜ 未核对 |
+| `docs/09-cli-scenarios-deep.md`（540 行） | ⬜ 场景需实跑 |
+| `docs/04` / `10` / `11` / `12` | ⬜ 优先级低 |
+| **`design/` 的 27 篇** | ⬜ **完全没覆盖** —— 本轮之前甚至不知道它比 `docs/` 还多 |
+
+**发现但未改**
+
+1. `stratum <命令> --help` **14 个命令全部不可用**（返回 2）。有意设计但对 `query`/`record` 不成立。
+2. `io`/`doctor`/`metrics`/`types`/`config` 五个命令**没有专题规格文档**。
+3. `docs/06` 的 5 个测试缺口（`Player` 控制面、`MetaCodec`、迭代器 `seek`/`Prev`、`SplitPolicy`、工厂 `Create`）。
+4. `design/` 与 `docs/` 的定位分工没写在任何地方。
+

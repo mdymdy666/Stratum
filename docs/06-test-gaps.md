@@ -22,6 +22,31 @@
 
 ---
 
+### 2026-10-19 核对结果
+
+逐项用 `grep` + `ctest` 实测（测试源文件 75 个、ctest 条目 70 个）：
+
+| # | 缺口 | 现状 |
+|---|---|---|
+| 1 | `Player` 控制面（`GetProgress` / `IsPlaying` / `RequestStop`） | ❌ **仍缺** —— `grep -rl "GetProgress\|RequestStop\|IsPlaying" tests/` 无命中 |
+| 2 | `Query::GetInfo` + `SessionMetadata` | ✅ **已补** —— `tests/unit/test_session_metadata.cc` 覆盖 |
+| 3 | `MetaCodec` | ❌ **仍缺** —— `tests/` 下无 `MetaCodec` 引用 |
+| 4 | 迭代器 `SeekToFirst` / `SeekForPrev` / `Prev` | ❌ **仍缺** —— `test_storage_contract.cc` 里 `Seek\|Prev` 出现 **0 次** |
+| 5 | `SplitPolicy` | ❌ **仍缺** |
+| 6 | `Status` 的分类判定（`IsIOError` 等） | ⚠️ **部分** —— `test_json_serializer.cc` 里有命中，但不是专门测 `Status` 的用例 |
+| 7 | 工厂接口 `Create()` | ❌ **仍缺** |
+
+**结论：7 项里 1 项已补、1 项部分、5 项仍缺。**
+
+> **注意**：这张表的价值在于它**仍然准确** —— 说明这份文档写完之后，
+> 测试覆盖没有发生实质性变化（虽然期间功能增加了 diff/merge，但那些都自带测试）。
+>
+> **建议**：#1（`Player` 控制面）和 #4（迭代器 seek/Prev）优先级最高 ——
+> 前者是**协作式停止**的正确性（`RequestStop` 后 `IsPlaying` 必须转 false），
+> 后者是**范围查询的边界**（反向遍历在时间轴场景里很常用）。
+
+---
+
 ## 二、间接覆盖（可接受，不必专门补）
 
 | 项 | 为什么可接受 |
