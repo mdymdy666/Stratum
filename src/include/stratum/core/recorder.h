@@ -364,6 +364,30 @@ struct PlaybackProgress {
   }
 };
 
+/// @brief 回放器：把时间线里的数据按时间轴重新发布到 DDS。
+///
+/// @par 模块定位
+/// 与 `Recorder` 互为逆操作。`Recorder` 消费 DDS 写时间线，`Player` 读时间线写 DDS。
+///
+/// @par 上层服务（按文件点名）
+///  · `src/cli/cmd_play.cc` —— `stratum play` 的唯一调用方
+///  · `tests/integration/test_record_replay*.cc` —— 端到端回环验证
+///
+/// @par 与相邻类的边界
+///  · **不做** DDS 发现 —— 那是 `protocol::IDdsBackend`（但 `PlayerConfig::discovery_wait_ms`
+///    暴露了"等发现完成"这个必要动作，见该字段的注释）
+///  · **不做** 话题改名 —— `PlayerConfig::topic_mapping` 只是把配置传给后端
+///  · **不做** 时间轴合并 —— 那是 `cmd_merge.cc`
+///
+/// @par 已实现与未实现
+/// 基础回放（速率、范围、映射、等待发现）已实现。
+/// **`--inject` / `--loop-count` 等 6 个选项未实现**，会明确报"暂不支持"（不静默）。
+/// 它们需要 core 层改动，见 `docs/02-open-issues.md`。
+///
+/// @par 两个必须可见的计数
+/// `republished_` 与 `publish_failed_` 是原子量且**对外暴露**，因为：
+///  · 回放"看起来成功"但实际丢了数据，是最难查的一类问题
+///  · 项目纪律是"不静默失败" —— 发不出去的条数必须能被读出来
 class Player {
  public:
   Player(ITimeline* timeline, protocol::IDdsBackend* backend);
@@ -383,12 +407,27 @@ class Player {
   PlaybackProgress GetProgress() const;
 
  private:
+  /// 数据来源（**非拥有**）。回放期间只读。
   ITimeline* timeline_;
+
+  /// DDS 后端（**非拥有**）。`Play` 时调 `Open`/`Send`/`Close`。
+  /// 注意 `PlayerConfig::discovery_wait_ms` 的作用：Open 之后必须等 SPDP/SEDP
+  /// 匹配完成才能发数据，否则对端会把样本当成"未知 writer"丢掉（实测收到 0 条）。
   protocol::IDdsBackend* backend_;
 
-  std::atomic<uint64_t> republished_{0};   // 收尾补救重发条数（用新 SN）
-  std::atomic<uint64_t> publish_failed_{0};  // 发布失败条数（必须可见）
+  /// 收尾补救时重发的条数（用**新 SN** 重发未被 ack 的样本）。
+  /// 为什么用新 SN：DDS 的可靠性机制不会为同一个 SN 重试无限次，
+  /// 且对端可能已把旧 SN 记为"已收" —— 只有新 SN 才会真正重传。
+  /// 使用者：Play（累加）、GetProgress（读）、CLI 输出
+  std::atomic<uint64_t> republished_{0};
 
+  /// 发布失败条数。**必须可见**（项目纪律：不静默失败）。
+  /// 与 `republished_` 的区别：这是"补发后仍然失败"，即真正丢了。
+  std::atomic<uint64_t> publish_failed_{0};
+
+  /// 是否正在回放。`RequestStop` 会把它置 false，`Play` 的循环检查它。
+  /// 与 `Player` 无 `state_` 状态机 —— 因为回放是一次性的阻塞调用，
+  /// 不存在 `Recorder` 那种"启动中被打断"的中间态。
   std::atomic<bool> playing_{false};
   std::atomic<bool> stop_requested_{false};
 
@@ -413,6 +452,31 @@ struct TopicSummary {
   bool active = false;
 };
 
+/// @brief 只读查询包装：把 `ITimeline` 的底层接口翻译成 CLI 需要的形状。
+///
+/// @par 模块定位
+/// 它是一个**极薄的适配层**（25 行）—— 不缓存、不索引、不做任何判断。
+/// 存在的理由是把"topic_id 的查法"与"输出的构造"从 CLI 里剥离出来，
+/// 让 `cmd_query.cc` / `cmd_verify.cc` / `cmd_diff.cc` / `cmd_merge.cc` 共用同一套读取逻辑。
+///
+/// @par 上层服务（按文件点名）
+///  · `src/cli/cmd_query.cc`  —— 全部读取都经本类
+///  · `src/cli/cmd_verify.cc` —— `ListTopics` / `GetInfo`
+///  · `src/cli/cmd_diff.cc`   —— `ListTopics`（拿条数与首末时间）
+///  · `src/cli/cmd_merge.cc`  —— `FindTopic`（`TopicSummary` 没有 topic_id，必须回到这里拿）
+///
+/// @par 与相邻类的边界
+///  · **不做** 缓存 —— 每次调用都直达存储层（多调用一次就多一次 IO，
+///    调用方自己在循环外缓存，例如 `cmd_diff` 的两遍打开）
+///  · **不做** 完整性判定 —— 只返回事实（`SessionMetadata` 里的质量字段），
+///    "算不算有问题"由 `verify` 给结论
+///  · **不做** 并发保护 —— 线程安全由 `ITimeline` 实现（`TimelineImplV2`）负责
+///
+/// @par 为什么 `FindTopic` 必须存在
+/// `ListTopics` 返回的是 `TopicSummary`，它**故意不含 `topic_id`**
+/// （摘要只给"用户看得懂的东西"）。任何要按 id 查询的路径都必须
+/// 先 `FindTopic(名字)` 拿 `TopicMetadata`，再 `ExportRange(id, ...)`。
+/// 忘了这一步会导致"用错 id 查到别人的数据"—— 而且不会报错。
 class Query {
  public:
   explicit Query(ITimeline* timeline) : timeline_(timeline) {}
@@ -435,6 +499,8 @@ class Query {
   Status FindTopic(const std::string& name, TopicMetadata* out) const;
 
  private:
+  /// 被查询的时间线（**非拥有**，生命周期由调用方保证）。
+  /// 不做空指针检查 —— 构造方（各 CLI 命令）在构造前已确认时间线已打开。
   ITimeline* timeline_;
 };
 
