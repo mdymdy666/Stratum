@@ -280,3 +280,8 @@ set_tests_properties(test_merge PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
 # GetProgress 单调性 / 空闲态。此前零覆盖，而"停不下来"只在并发时序下暴露。
 stratum_add_test(test_player_control unit/test_player_control.cc unit core)
 set_tests_properties(test_player_control PROPERTIES TIMEOUT 120)
+
+# MetaCodec（docs/06 缺口 #3）：三种元数据往返 + 高版本必须拒绝（FR-S-2）
+# + 截断/超界/垃圾输入 + MakeTopicKey 差分
+stratum_add_test(test_meta_codec unit/test_meta_codec.cc unit core)
+set_tests_properties(test_meta_codec PROPERTIES TIMEOUT 60)
