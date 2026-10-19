@@ -285,3 +285,8 @@ set_tests_properties(test_player_control PROPERTIES TIMEOUT 120)
 # + 截断/超界/垃圾输入 + MakeTopicKey 差分
 stratum_add_test(test_meta_codec unit/test_meta_codec.cc unit core)
 set_tests_properties(test_meta_codec PROPERTIES TIMEOUT 60)
+
+# SplitPolicy + 存储工厂（docs/06 缺口 #4/#5）：
+# 0 表示「不限」而非「零上限」；工厂 Create 必须返回**正确类型**（dynamic_cast 验证）
+stratum_add_test(test_split_policy_factory unit/test_split_policy_factory.cc unit core)
+set_tests_properties(test_split_policy_factory PROPERTIES TIMEOUT 60)
