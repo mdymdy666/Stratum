@@ -40,6 +40,7 @@
 | [`17-comment-style.md`](17-comment-style.md) | **注释规范（可执行模板）**：类级三项必填、状态机转化表、成员变量三要素、复杂函数 step 分解 |
 - [`18-doc-alignment-report.md`](18-doc-alignment-report.md) —— **文档对齐报告**：已修正 5 处事实错误 + 待改进项 + 核对方法
 - [`19-play-batch-optimization.md`](19-play-batch-optimization.md) —— **回放带宽优化**：一个 RTPS Message 装多条 DATA（含修掉的无对端静默丢数据 bug）
+- [`20-project-progress.md`](20-project-progress.md) —— **项目进度总览**：做到哪了、还差什么、踩过哪些坑（新人先读这篇）
 | [`handoff-readme.md`](handoff-readme.md) | 历史：本项目早期的"文档集索引"（已由根 README 取代） |
 
 ---
