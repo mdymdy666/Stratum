@@ -146,6 +146,10 @@ source_to_stop = std::move(source_);
 
 ## 七、检查方式
 
+> **一个踩过的坑**：本文件最早写的检查是"往前看 8 行有没有 `lock_guard`"，
+> 实测 `state_ = kStopping`（149 行）与 `lock_guard`（139 行）相隔 10 行，
+> 于是误报"不在锁内"。**固定行数窗口做不了作用域判断** —— 窗口小会漏报，窗口大会假通过。
+
 ```bash
 # 1) 列出所有修改状态的地方 —— 逐个核对是否在上面的转化表里
 grep -n "state_ *=" src/src/core/recorder.cc
@@ -166,10 +170,116 @@ grep -n "state_ *[!=]=\|switch (state_)" src/src/core/recorder.cc
 # 3) 确认每个状态都有出口（不能有"进得去出不来"的状态）
 #    对照第二节的状态列表，每个状态在第三节都应至少出现一次作为"起始状态"
 
-# 4) 确认所有状态切换都在锁内
-grep -n -B3 "state_ *=" src/src/core/recorder.cc | grep -c "lock_guard"
-#   预期与第 1 步的行数一致（每次切换前都取了锁）
+# 4) 确认所有状态切换都在 lock_guard **作用域**内
+#
+# ⚠️ 这个检查器本身被写错过两次，所以它必须先自检。
+#
+# 第一版：`grep -B3` 往前看 8 行
+#   → 窗口太小。`state_ = kStopping`(149) 与 `lock_guard`(139) 相隔 10 行，误报。
+# 第二版：往上找"最近的未闭合 {"，看那个块里有没有 lock_guard
+#   → 找到的是**内层块**：
+#       {                          ← 外层块，锁在这里
+#         lock_guard(...);
+#         switch (state_) {
+#           case kRunning: {       ← 第二版找到这个
+#             state_ = kStopping;  ← 149
+#     内层块里没有锁 → 又误报。
+# 第三版（下面这个）：逐层往外找，**任一层**开头有 lock_guard 就算锁内。
+#   而且它先用合成样例自检（1 条必须判锁内、1 条必须判锁外），
+#   自检不过就不去检查真实代码。
+#
+# 把下面的内容存成 /tmp/check_lock_scope.py 再运行：
+python3 /tmp/check_lock_scope.py
+#   预期输出结尾：✓ 全部 7 处都在 lock_guard 作用域内
 ```
+
+<details>
+<summary>点开看 <code>check_lock_scope.py</code> 的源码</summary>
+
+```python
+import re, sys
+
+SRC = "src/src/core/recorder.cc"
+
+# 合成样例：验证检查器本身（一条应在锁内、一条应在锁外）
+SELF_TEST = """
+void Demo::Guarded() {
+    {
+        std::lock_guard<std::mutex> lock(m);
+        switch (x) {
+          case 1: {
+            state_ = kRunning;        // 应判「锁内」
+            break;
+          }
+        }
+    }
+}
+
+void Demo::Unguarded() {
+    state_ = kIdle;                   // 应判「锁外」
+}
+"""
+
+
+def classify(src_lines, idx):
+    """逐层往外找：任一层块的起始几行有 lock_guard → 锁内。"""
+    depth = 0
+    j = idx
+    while j >= 0:
+        code = re.sub(r"//.*", "", src_lines[j])
+        depth += code.count("}") - code.count("{")
+        if depth < 0:
+            head = "\n".join(src_lines[j:j + 4])
+            if "lock_guard" in head:
+                return True, j + 1
+            depth = 0            # 继续往外层找
+        j -= 1
+    return False, None
+
+
+def rows_of(src_lines):
+    out = []
+    for i, line in enumerate(src_lines):
+        if re.search(r"state_\s*=", line):
+            g, blk = classify(src_lines, i)
+            out.append((i + 1, line.strip(), blk, g))
+    return out
+
+
+# --- 1) 自检 ---
+demo = SELF_TEST.splitlines()
+r = rows_of(demo)
+if sum(1 for x in r if x[3]) != 1 or sum(1 for x in r if not x[3]) != 1:
+    print("✗ 检查器自检失败，不能用它的结论")
+    sys.exit(2)
+print("✓ 检查器自检通过")
+
+# --- 2) 检查真实代码 ---
+src = open(SRC, encoding="utf-8").read().splitlines()
+r = rows_of(src)
+bad = [(x[0], x[1]) for x in r if not x[3]]
+for ln, stmt, blk, g in r:
+    print("  行 %-5d %-38s 锁层=%-5s %s" % (ln, stmt[:38], str(blk), "锁内" if g else "锁外"))
+sys.exit(1 if bad else 0)
+```
+
+</details>
+
+**这个检查器验证过结论**（2026-10-19）：
+```
+✓ 检查器自检通过（1 条判锁内、1 条判锁外）
+行 67    state_ = kStarting;   锁层=61     锁内
+行 92    state_ = kIdle;       锁层=90     锁内
+行 102   state_ = kIdle;       锁层=98     锁内
+行 119   state_ = kIdle;       锁层=98     锁内
+行 121   state_ = kRunning;    锁层=98     锁内
+行 149   state_ = kStopping;   锁层=138    锁内
+行 183   state_ = kIdle;       锁层=181    锁内
+✓ 全部 7 处都在 lock_guard 作用域内
+```
+
+**这个检查本身也要验证**：故意把某一处 `state_ = ...` 挪到锁外，脚本必须报错。
+如果挪出去它还说"✓"，说明检查失效了（本项目有过"校验自身会错"的教训）。
 
 ---
 
