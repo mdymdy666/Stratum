@@ -1,0 +1,201 @@
+# 19 · 回放带宽优化：一个 RTPS Message 装多条 DATA
+
+> 状态：**已实现并有报文级实测数字**；真实链路的收益**未测**（见第五节）。
+> 日期：2026-10-19。
+
+---
+
+## 一、要解决什么
+
+`RtpsWriter::Publish` 是「一条样本一个 UDP 包」。固定开销：
+
+```
+IP(20) + UDP(8) + Message Header(20) + INFO_DST(16) + INFO_TS(12) + DATA 头(24) = 100 字节
+```
+
+HelloWorld 的 payload 只有 24 字节 → **payload 只占 19%，81% 是开销**。
+
+对回放意味着：回放 1000 条 24 字节的样本，网络上跑了 **124 KB**，
+而有效数据只有 **24 KB**。
+
+---
+
+## 二、方案：一个 Message 装多个 DATA 子消息
+
+**依据**：RTPS 2.3 §8.3.3 —— 一个 Message 可以包含多个子消息。
+
+**关键点**：每个 DATA 子消息自带 `writerId(4B)` 与 `SN(8B)`，所以：
+
+- 同一 writer（同一 topic）的多条可以合
+- **不同 writer（不同 topic）的样本也可以合** —— 对端按 `writerId` 分发
+
+**省的是什么**：
+
+```
+单发 N 条: N × (Message Header 20 + INFO_DST 16 + 12 + 24 + payload)
+批量 N 条: (20 + 16) + N × (12 + 24 + payload)
+净省: 36 × (N-1) 字节
+再加 (N-1) × 28 字节的 IP/UDP 头（一次 sendto 一个包）
+```
+
+---
+
+## 三、实测数字（★ 带限定条件）
+
+测试直接 `printf` 输出，不是估算：
+
+```
+payload=24B  N=10
+RTPS 字节:    800 → 620    省 180 (22%)
+含 IP/UDP:   1080 → 648    省 432 (40%)
+sendto 次数:   10 → 1
+```
+
+**这是「报文构造层面」的数字，不是真实链路的。**
+
+真实链路还要叠加：
+
+| 额外开销 | 影响 |
+|---|---|
+| UDP/IP 分片 | 批越大越容易超过 MTU 1500 → 触发 IP 分片 → 在 NAT/中继路径上会被丢弃 |
+| 可靠传输重传 | `--durability` 相关的 DATA 重发，批与单发的重传粒度不同 |
+| HEARTBEAT / ACKNACK | 与批大小无关的固定往返 |
+
+**所以「省 40%」不能对外当承诺** —— 真实链路可能是 15%。**一个数字不带限定条件，
+就会被下一个人拿去当承诺，而落差比没有优化更伤信任。**
+
+---
+
+## 四、三条实现语义（都写进了测试）
+
+### 1. `N=1` 时与 `BuildDataPacket` 逐字节相同
+
+它证明的不是"批量能用"，而是**"批量没有另起一套实现"**。
+将来若有人改了单发的构造（加字段、改 flags），这条测试会立刻红 —— 是**防分叉的锁**。
+
+### 2. SEDP 公告不被批量绕过
+
+批量开头逐 topic 检查 `announced_`，缺的先 `BuildPublication` + 逐个 peer 发。
+
+漏了它的后果（`docs/01` §1.1 踩过）：对端发现不了 writer → 用户数据全发到
+metatraffic 端口 → **对端收 0 条、两端无报错**。
+
+### 3. SN 按 writer 各自分配
+
+每条各自 `NextSnFor(WriterEntityFor(topic,type))`。
+
+整批共用一个 SN 的后果：同 writer 的 N 条被判重复 → **对端只收 1 条**。
+
+---
+
+## 五、★ 实现过程中修掉的一个真 bug（静默丢数据）
+
+### 症状
+
+`Publish` 在**没有已发现的对端**时（`sent == 0`）：
+
+1. 数据已进入 `pending_` 缓存（待对端出现后补发）
+2. 返回 `NotFound("尚无已发现的对端 Reader（数据已缓存待补发）")`
+
+而 `PublishBatch` **无条件返回 `OK`** —— peers 为空 → `for` 循环不执行 → 直接 `return Status::OK()`。
+
+### 实测复现（1000 条、无对端）
+
+```
+--batch-size 1   → 发送窗口: 0 条      （每次都返回 NotFound，走 continue）
+--batch-size 16  → 发送窗口: 1000 条   ← 假成功
+```
+
+**批量那侧：数据没发出、没进 pending、调用方以为成功 —— 永久丢失且两端不报错。**
+
+这正是项目反复吃过的静默失败模式。
+
+### 修法
+
+`sent == 0` 时**降级为逐条 `Publish`**：
+
+```cpp
+if (sent == 0) {
+  for (const auto& s : samples) {
+    const Status st = Publish(s.topic_name, s.type_name, s.payload, s.source_ts_ns);
+    if (!st.ok() && !st.IsNotFound()) return st;   // NotFound 是"已缓存"，不算失败
+  }
+  return Status::NotFound("尚无已发现的对端 Reader（批量已降级为逐条缓存 N 条待补发）");
+}
+```
+
+**为什么不照抄入队**：`pending_` 的一条记录对应**一个完整报文**，
+而批量的一个报文含 N 条样本 —— 无法按样本入队。逐条调 `Publish` 是最小改动，
+且能让每条都走它自己的缓存路径。
+
+**代价**：无对端时退化为逐条（慢）。但那本来就是异常情况，不是热路径。
+
+### 修复后验证
+
+```
+--batch-size 1   → 发送窗口: 0 条
+--batch-size 16  → 发送窗口: 0 条      ← 与逐条一致
+```
+
+---
+
+## 六、接口与开关
+
+| 位置 | 内容 |
+|---|---|
+| `ISink::PublishBatch` | **默认实现 = 循环单发**（所有既有后端零改动） |
+| `RtpsSink::PublishBatch` | override，转 `BatchSample` 调 `RtpsWriter::PublishBatch` |
+| `PlayerConfig::batch_size` | **默认 1 = 逐条**（行为与改动前完全一致） |
+| `stratum play --batch-size N` | 1~32，超出返回 USAGE(2) |
+
+**为什么默认 1**：`player.cc` 有三处已验证的时序（VOLATILE 首条要 `sleep 500ms`、
+协作式停止、`publish_failed_` 计数语义）。默认逐条让这次改动**零回归**。
+
+---
+
+## 七、`player.cc` 的接入细节（只换「怎么发」）
+
+**保持 per-item 的 6 件事**（全部未动）：
+
+1. `stop_requested_` 检查
+2. **速率控制**（按目标时刻 sleep，不累积漂移）
+3. 失败计数 `publish_failed_`
+4. `head_samples`（只存首条，用于收尾补救）
+5. `publish_callback`（逻辑事件，不是发送事件）
+6. `progress` 更新
+
+**只改了一个点**：`sink->Publish` → 按 `batch_size` 分支（≤1 走原路径，>1 攒批）。
+
+**批量模式下的三个语义决定**：
+
+| 决定 | 理由 |
+|---|---|
+| **失败按批内条数计** `publish_failed_ += N` | 它的语义是"多少条没发出去"，不是"失败了几次" |
+| **速率控制仍逐条** | 否则"整批等最后一条的目标时刻"会让首条延迟变大 |
+| **`published` 在 flush 成功后累加** | 攒进 buffer 还不算已发布（可能批构造失败） |
+
+**必须 flush 剩余**：循环结束时缓冲里可能还有不足一批的样本。
+忘了这一步会表现为"回放了 100 条、订阅端收到 96 条"，且**只在 `batch_size` 不整除总数时出现** ——
+最难查的那类。
+
+---
+
+## 八、已知限制（明确）
+
+| 限制 | 说明 |
+|---|---|
+| **真实链路收益未测** | 需要 DDS 对端。报文级省 40%，真实可能 15% |
+| **无对端时退化为逐条** | 刻意的语义对齐，不是缺陷；但意味着"批量只在有对端时省带宽" |
+| **批量不支持 DATA_FRAG** | 单条超 65515 字节仍走 `BuildFragPackets` 的单发路径 |
+| **批大小建议 ≤ 32** | 再大会让首条延迟变长、单包接近 MTU 触发 IP 分片 |
+| **批量的重传统一按批粒度** | `pending_` 记的是整批报文，重传时整批重发（不是逐条） |
+
+---
+
+## 九、后续可做
+
+1. **端到端量化**：起一个 Fast DDS 订阅者，回放 1000 条对比
+   `--batch-size 1` vs `16` 的真实网络字节（`/proc/net/dev` 差值或 `strace -c -e sendto`）
+2. **自适应批大小**：按 `max_udp_payload` 反推（避免 IP 分片）
+3. **`BuildDataPacket` 两个并存入口的整改**（结构体版 + 5 参数版）——
+   见 `AI_COLLAB.md` 的「发现但未改」

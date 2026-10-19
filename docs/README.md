@@ -39,6 +39,7 @@
 | [`16-session-merge.md`](16-session-merge.md) | **多会话合并的设计裁决**：三个技术问题（用哪个时钟 / 同名 topic 怎么表示 / 去重按什么）+ 核心约束（不判断数据对错）+ 局限（时钟偏差、跳变被抹平）+ 输出契约 + 测试计划 |
 | [`17-comment-style.md`](17-comment-style.md) | **注释规范（可执行模板）**：类级三项必填、状态机转化表、成员变量三要素、复杂函数 step 分解 |
 - [`18-doc-alignment-report.md`](18-doc-alignment-report.md) —— **文档对齐报告**：已修正 5 处事实错误 + 待改进项 + 核对方法
+- [`19-play-batch-optimization.md`](19-play-batch-optimization.md) —— **回放带宽优化**：一个 RTPS Message 装多条 DATA（含修掉的无对端静默丢数据 bug）
 | [`handoff-readme.md`](handoff-readme.md) | 历史：本项目早期的"文档集索引"（已由根 README 取代） |
 
 ---
