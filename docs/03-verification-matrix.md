@@ -7,6 +7,10 @@
 
 ## 一、场景脚本总览（19 个）
 
+> **2026-10-19 更新**：脚本已增至 **29 个**（`tools/fastdds_sub_diag/scenarios/`，
+> 编号 01 / 01b / 01c / 01d / 02~26），下表补入 22~26；
+> 原文的"19 个"是 2026-10-13 的规模，保留作为历史。
+
 | 脚本 | 用途 | 关键判据 |
 |---|---|---|
 | `01_stratum_replay.sh` | 核心回放链路 | `[diag][MATCH]` + `samples>0` |
@@ -33,6 +37,11 @@
 | `19_overwrite_guard.sh` | **录制器覆盖保护**（O19） | 非空目录必须拒绝；`--overwrite` 才清空 |
 | `20_packet_loss.sh` | **丢包收敛**（E1） | 1% 完全收敛；5%/10% 残留 |
 | `21_regression_loop.sh` | **反复回归**（E4） | 连续 N 轮 ctest + 关键场景无 flaky |
+| `22_cross_host.sh` | 跨主机基本链路 | 需第二台主机（O1） |
+| `23_cross_host_relay.sh` | 跨主机 + UDP 中继 | 中继两侧条数对账 |
+| `24_cross_host_complex.sh` | 跨主机复杂场景 | 同 `22` |
+| `25_cross_host_stress.sh` | 跨主机压测 | 同 `22` |
+| `26_frag_stress.sh` | DATA_FRAG 接收侧健壮性 | 4 项全 PASS（见 §三 新增表） |
 
 ### 辅助工具
 
@@ -104,7 +113,7 @@ bash tools/fastdds_sub_diag/build_capture.sh
 bash tools/fastdds_sub_diag/build_tools.sh
 bash tools/fastdds_sub_diag/build_pub.sh
 
-cd build && ctest                      # 全量单测/集成测试（33/33）
+cd build && ctest                      # 全量单测/集成测试（2026-10-19 实测：70/70）
 
 cd .. && for s in 08_accounting 09_payload_sizes 11_qos_matrix 12_keyed_topic \
                  15_latency_jitter 16_multitopic; do
@@ -120,6 +129,6 @@ done
 | 项 | 覆盖 | 结果 |
 |---|---|---|
 | `scenarios/26_frag_stress.sh` | DATA_FRAG 接收侧：多 writer 交错 / 缓存上限 / 畸形分片 / 部分分片不误交付 | 4 项全 PASS |
-| `tests/unit/test_ack_bitmap.cc` | ACKNACK 位图三条路径 + 大端位序 + 跨字节 + 边界 | 5 用例全 PASS（`ctest` 34/34） |
+| `tests/unit/test_ack_bitmap.cc` | ACKNACK 位图三条路径 + 大端位序 + 跨字节 + 边界 | 5 用例全 PASS（当时 `ctest` 34/34；**2026-10-19 实测 70/70**） |
 | `tools/frag_fuzz.cc` | 分片注入工具（partial / overflow / malformed） | 支撑上述场景 |
 | `tools/start_cross_host.py` | 跨主机环境一键准备 | 主流程实测通过 |

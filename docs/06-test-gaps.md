@@ -61,9 +61,9 @@ src/ 下没有任何实现或使用者
 | 层次 | 状态 |
 |---|---|
 | examples（C++） | **5/5 模块**：10 文件（demo **1345 行** + full **3094 行**），**15 个真实场景**，全部编译+实测，**连跑两次幂等**，CMake **10/10** |
-| tests | **5/5 模块**，`ctest` **37/37**，每模块含 **大数据量 / 随机 / 真实场景** 三类 |
+| tests | **5/5 模块**，`ctest` **37/37**（**2026-10-19 更新：实际 70/70**），每模块含 **大数据量 / 随机 / 真实场景** 三类 |
 | 对账 A | **200/200**（序号缺口 0） |
-| 真实场景脚本 | **28 个**（互通、录制回放、QoS、keyed、崩溃恢复、丢包、跨主机…） |
+| 真实场景脚本 | **28 个**（**2026-10-19 更新：实际 29 个**；互通、录制回放、QoS、keyed、崩溃恢复、丢包、跨主机…） |
 
 ### 各模块测试的三类证据
 
@@ -78,6 +78,11 @@ src/ 下没有任何实现或使用者
 ---
 
 ## 五、另有一处「接口已定、实现未落」
+
+> **2026-10-19 更新：本节的缺口已补齐。** `src/src/types/dynamic_value.cc` 已实现全部
+> `Make*` 工厂与 `ToString`，`tests/types/test_dynamic_value.cc` 直接覆盖；
+> `tests/types/test_types_serializer.cc` 里的 `KnownGap_*` 用例保留为历史记录。
+> 以下为原始审计内容。
 
 `types/iserializer.h` 声明了 `DynamicValue::MakeNull/MakeBool/MakeInt32/MakeInt64/
 MakeUInt32/MakeUInt64/MakeDouble/MakeString/MakeBytes/MakeArray/MakeStruct`

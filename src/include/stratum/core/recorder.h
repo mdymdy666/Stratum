@@ -68,8 +68,53 @@ struct RecorderConfig {
 };
 
 // ---------------------------------------------------------------------------
-// Recorder
+// Recorder —— DDS 样本的落盘端
 // ---------------------------------------------------------------------------
+/// @brief 把后端回调收到的样本写进时间线（`ITimeline`）。
+///
+/// @par 模块定位
+/// 本类是 `stratum::core` 的**唯一写入端**。读端是 `Query`，两者最终落到同一个
+/// `ITimeline` 存储上 —— 所以"写"与"读"的互斥由存储层保证，
+/// 而本类自己的 `mutex_` **只保护入队队列**，与读路径无关
+/// （误以为 `mutex_` 能挡住读方，是读这段代码时最容易犯的错）。
+///
+/// @par 保证
+///  · `Start` 返回成功 ⇒ 后端已在收数据、writer 线程已运行
+///  · `Stop` 返回成功 ⇒ 队列已冲刷 + `Flush()` 已调用；若
+///    `config.close_timeline_on_stop` 为真，时间线也已 `Close()`
+///  · **不保证**：`Stop` 期间到达的样本一定写入 —— `stop_requested_` 置位后
+///    迟到样本会被丢弃（这是"尽快停下来"与"一条不漏"之间的取舍）
+///  · **不保证**：`GetStats().bytes_recorded` 与实际磁盘占用一致（存储层可能压缩）
+///
+/// @par 上层服务（按文件点名）
+///  · `src/cli/cmd_record.cc`  —— `stratum record` 的生产调用方
+///  · `src/cli/cmd_probe.cc`   —— 把探针样本经 recorder 写进同一条时间线
+///  · `tests/unit/test_recorder_queue.cc`、`tests/integration/test_record_*.cc`
+///
+/// @par 与相邻类的边界（这些事**不**在本类做）
+///  · **不做** DDS 发现/匹配 —— 那是 `protocol::IDdsBackend`
+///  · **不做** 序列化 —— 那是 `types::ISerializer`
+///  · **不做** 完整性判定 —— 那是 `stratum verify`
+///  · **不做** 保留淘汰的执行 —— 只调 `ITimeline::SetRetentionPolicy`，实际淘汰在存储层
+///  · **不做** 回放 —— 那是 `Player`
+///
+/// @par 状态机
+/// `kIdle → kStarting → kRunning → kStopping → kIdle`（四态，没有 `kClosed`）。
+/// **完整转化表见 `docs/state/recorder.md`** —— 那是状态机检查的权威依据；
+/// 修改任何状态切换前必须先更新它，否则那张表会变成"看起来权威其实过期"的东西。
+///
+/// @par 并发模型（三个执行体 + 两把锁）
+/// 执行体：
+///  · **调用方线程** —— `Start` / `Stop` / `Flush` / `GetStats`
+///  · **后端回调线程** —— `OnSample`，**只入队、绝不 IO**（这是它能跑在 DDS 线程上的前提）
+///  · **writer 线程** —— `WriterLoop` → `WriteBatch`，**唯一**写时间线的执行体
+///
+/// 两把锁，职责不重叠：
+///  · `state_mutex_` —— 只管 `state_`
+///  · `mutex_`       —— 只管 `queue_` / `queue_bytes_` / `topic_ids_`
+///
+/// **不要交叉持有**：代码里没有同时取两把锁的路径。若将来需要，
+/// 必须固定顺序并写进 `docs/state/recorder.md`，否则会引入死锁。
 class Recorder {
  public:
   Recorder(ITimeline* timeline, protocol::IDdsBackend* backend);
@@ -123,22 +168,76 @@ class Recorder {
   // 处理一批样本（调用者不持锁）
   void WriteBatch(std::vector<protocol::ReceivedSample>* batch);
 
+  /// 时间线（**非拥有**指针，由调用方管理生命周期）。
+  /// 只在 writer 线程里被写（`WriteBatch`），以及 `Stop` 里被 `Flush`/`Close`。
+  /// 使用者：Start（SetRetentionPolicy）、WriteBatch、Stop、Flush
   ITimeline* timeline_;
+
+  /// DDS 后端（**非拥有**指针）。
+  /// 只在 `Start` 里调 `CreateSource`、以及 `~Recorder` 里用于确认后端仍在。
+  /// 注意：`CreateSource` 在**锁外**调用（可能耗时数百毫秒），见 docs/state/recorder.md 时序 1。
+  /// 使用者：Start
   protocol::IDdsBackend* backend_;
+
+  /// 后端数据源的持有者（**拥有**，move-only）。
+  /// 生命周期与 `state_` 绑定：`Start` 成功时移入，`Stop` 时移到局部变量再在锁外 Stop，
+  /// `Start` 失败时随栈销毁。
+  /// **为什么要在锁内移出**：保证 `Stop` 不会错过一个刚创建但尚未移出的 source。
+  /// 使用者：Start（移入）、Stop（移出并 Stop）
   protocol::SourcePtr source_;
 
+  /// 当前生效的配置快照（`Start` 时整体赋值，之后不再变）。
+  /// **只在持锁时写**（Start 在 `kIdle -> kStarting` 之后立即赋值），
+  /// 读的地方：`Stop`（`close_timeline_on_stop`）、`WriteBatch`（保留策略）。
+  /// 使用者：Start、Stop、WriteBatch
   RecorderConfig config_;
+
+  /// 是否正在对外提供"在录制"的信号（**只用于 `IsRunning()` 的快速判断**）。
+  /// 与 `state_` 的区别：`state_` 是精确状态机，`running_` 是给外部看的粗粒度视图。
+  /// 二者**不保证同时更新到同一瞬间**（`running_` 是原子量，`state_` 受锁保护）——
+  /// 需要精确判断时用 `state_`，需要无锁读时用 `running_`。
+  /// 使用者：Start/Stop（写）、IsRunning（读）
   std::atomic<bool> running_{false};
+
+  /// "已请求停止"标志，**唯一用途**是让 `Start` 在耗时操作返回后知道要回滚。
+  /// 置位者：`Stop`（锁内）；清除者：`Start` 抢占 `kIdle -> kStarting` 时。
+  /// 读取者：`Start`（锁内检查）、`WriterLoop`（决定是否退出循环）。
+  /// **为什么不用 `state_` 代替**：`Start` 在第 2 段持锁时 `state_` 可能已被
+  /// `Stop` 改成 `kStopping`，再读 `state_` 无法区分"我自己启动失败"与"别人叫我停"。
   std::atomic<bool> stop_requested_{false};
 
+  /// 队列锁。保护 `queue_` / `queue_bytes_` / `topic_ids_` / `last_retention_run_ns_`。
+  /// **不保护** `state_`（那是 `state_mutex_` 的职责）——
+  /// 两把锁从不交叉持有，所以没有死锁风险。见类注释的「并发模型」。
+  /// 使用者：OnSample、WriterLoop、WriteBatch、Flush、GetStats
   mutable std::mutex mutex_;
-  std::condition_variable cv_;        // 通知写盘线程：有新数据
-  std::condition_variable cv_space_;  // 通知后端线程：队列有空间（kBlock 用）
+
+  /// "有新数据"条件变量。`OnSample` 入队后 notify；`WriterLoop` 等它醒来批量取。
+  /// 等待上限是 `config_.idle_flush_interval_ms`（默认 200ms），
+  /// 所以**队列空时 writer 线程每 200ms 醒一次**做定期元数据落盘 —— 这不是 bug。
+  std::condition_variable cv_;
+
+  /// "队列有空间"条件变量。**只在后端策略为 `kBlock` 时被使用**：
+  /// 队列满时 `OnSample` 在这里等，`WriterLoop` 取走数据后 notify。
+  /// 【关键】`Stop` 必须先 notify 这个再移走 `source_` —— 否则后端线程
+  /// 阻塞在这里时，`source->Stop()` 里的 join 会永久等待（死锁）。
+  /// 见 docs/state/recorder.md 第六节时序 2。
+  std::condition_variable cv_space_;
 
   // 上次执行保留淘汰的纳秒时间戳（节流用，B-H5）。
   uint64_t last_retention_run_ns_ = 0;
 
+  /// 待写样本队列（FIFO）。唯一的生产者：后端回调线程（`OnSample`）；
+  /// 唯一的消费者：writer 线程（`WriterLoop`）。受 `mutex_` 保护。
+  /// 容量由 `RecorderConfig::record.max_queue_bytes` 约束（按 `queue_bytes_` 计）,
+  /// 超限时的行为由 `record.on_full` 决定（drop-newest / drop-oldest / block）。
   std::deque<protocol::ReceivedSample> queue_;
+
+  /// 队列当前占用的字节数**估算**（不是精确内存占用，只用于上限判断）。
+  /// 【必须】入队与出队用**同一个** `SampleBytes()` 计算 ——
+  /// 早期实现入队算 `payload + topic_name`、出队只减 `payload`，
+  /// 导致这个值单调虚增，最终恒大于上限 → 录制中途开始丢弃全部新数据。
+  /// 见 `SampleBytes` 的注释与审查记录 C3。
   size_t queue_bytes_ = 0;
 
   // 单条样本占用的字节数。
@@ -151,12 +250,43 @@ class Recorder {
     return static_cast<uint64_t>(s.payload.size() + s.topic_name.size());
   }
 
+  /// 后台写盘线程。**只在 `state_mutex_` 内创建与移出，join 在锁外**。
+  /// 这个"创建/移出在锁内、join 在锁外"的模式是为了：
+  ///  · 锁内保证 `Stop` 不会错过一个正在创建中的线程
+  ///  · 锁外 join 避免持锁等待（否则 `Stop` 会阻塞所有状态查询）
+  /// 使用者：Start（创建）、Stop（移出后 join）
   std::thread writer_thread_;
 
-  // 话题名 → topic_id 的缓存（避免每条样本都查元数据）
+  /// 话题名 → topic_id 的缓存，避免每条样本都去 `ITimeline` 查元数据。
+  /// 受 `mutex_` 保护。**只增不减**（话题数是有界的，不值得做淘汰）。
+  /// 竞态说明：后端可能对同一个话题并发回调（DDS 多线程接收），
+  /// 所以查-插这一对必须在锁内完成，否则会重复注册同一话题。
   std::unordered_map<std::string, uint32_t> topic_ids_;
 
-  // 统计（原子，可在后端线程与录制线程并发更新）
+  /// 统计量（原子，可在三个执行体里并发更新）。
+  ///
+  /// @par 设计意图（**注意：不是已验证的不变量**）
+  /// 期望的关系是：`received_ == recorded_ + dropped_ + queue_.size()`
+  /// 即"收到的 = 写下去的 + 丢掉的 + 还在排队的"。
+  ///
+  /// 成立的前提是 `received_` 在**入队前**就 +1（`recorder.cc:196`）——
+  /// 所以随后无论是入队、被 drop-newest 丢弃、还是被 drop-oldest 挤出，
+  /// 都已经计入了 received。
+  ///
+  /// **但当前没有任何测试断言它**（`test_recorder_queue` 验的是别的性质）。
+  /// 而且并发下 `GetStats()` 是**分五次独立原子读**，五次之间状态会变，
+  /// 所以外部观察到的快照**可能不满足**这个等式（差值通常是 0 到队列长度之间）。
+  ///
+  /// 若将来要把它变成真正的断言，必须先把统计做成**一次性快照**
+  /// （在同一把锁内读全部字段，或用一个 struct 原子替换）。
+  /// 在那之前，请把它当作**读代码时的心智模型**，而不是可以依赖的契约。
+  ///
+  /// 各字段的更新者：
+  ///  · `received_`  —— OnSample（入队成功时）
+  ///  · `recorded_`  —— WriteBatch（真正写进时间线时）
+  ///  · `dropped_`   —— OnSample（队列满且策略为 drop-* 时）
+  ///  · `queue_high_water_` —— OnSample（入队后比较取大）
+  ///  · `bytes_recorded_`   —— WriteBatch
   std::atomic<uint64_t> received_{0};
   std::atomic<uint64_t> recorded_{0};
   std::atomic<uint64_t> dropped_{0};

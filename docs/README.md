@@ -23,19 +23,21 @@
 |---|---|
 | [`01-resolved-issues.md`](01-resolved-issues.md) | **已解决问题**：现象 → 根因 → 修复 → 验证；开头归纳了**四类问题模式** |
 | [`02-open-issues.md`](02-open-issues.md) | **遗留问题**（🔴 / 🟡 / 🟢 + 环境约束） |
-| [`03-verification-matrix.md`](03-verification-matrix.md) | **验证矩阵**：28 个场景脚本 ↔ 覆盖的问题 ↔ 判据 |
+| [`03-verification-matrix.md`](03-verification-matrix.md) | **验证矩阵**：29 个场景脚本 ↔ 覆盖的问题 ↔ 判据（2026-10-19 实测数目） |
 | [`04-deployment.md`](04-deployment.md) | **部署与跨主机运行手册**：必做系统配置、中继用法、端口公式、环境坑速查 |
+| [`05-example-test-matrix.md`](05-example-test-matrix.md) | **示例与测试覆盖矩阵**：5 个模块的 demo/full 示例行数、tests 三类覆盖、进度记录 |
 | [`06-test-gaps.md`](06-test-gaps.md) | **测试缺口清单**（审计结果：真缺口 / 间接覆盖 / 死接口；含补法建议） |
 | [`07-cli-design.md`](07-cli-design.md) | **生产级 CLI 设计**（32 个场景，每条含需求来源 + 命令形态 + 延伸） |
 | [`08-cli-spec.md`](08-cli-spec.md) | **CLI 参数级规范**：通用参数、选择器 BNF、各命令完整参数、状态机、锁与并发矩阵 |
 | [`09-cli-scenarios-deep.md`](09-cli-scenarios-deep.md) | **32 场景再发散**：边界分支 / 失败模式 / 场景交互，回收 18 条新约束 |
+| [`10-porting-notes.md`](10-porting-notes.md) | **移植笔记**：go2cpp → Stratum 的文件映射、裁剪项、踩坑（`config` 已拆为 standalone 库） |
 | [`11-type-system.md`](11-type-system.md) | **类型系统的决策与已知边界**：定义格式选型（简化自描述）、两处已知有损、元数据独立 key 约定、端到端链路现状 |
 | [`12-roadmap.md`](12-roadmap.md) | **进度快照与下一步任务**：当前状态、已完成清单、用户期望（eBPF/topic 动态检测）及评估、三层下一步任务、遗留问题、方法学纪律 |
 | [`13-probe-requirements.md`](13-probe-requirements.md) | **埋点工程需求分析**：12 个真实场景（含监控回调/格式动态指定/QoS 动态调配/topic 动态配置）、16 条需求（PR-01~16）、边界与非目标 |
 | [`14-verify-business-layer.md`](14-verify-business-layer.md) | **verify 的业务层视角**：为什么 verify 不对业务逻辑下结论、两层设计（分层/启发式）、RC-B1 交叉发现、三个实现坑 |
 | [`15-session-diff.md`](15-session-diff.md) | **会话对比的设计裁决**：三个技术问题（相对时间对齐 / topic 级统计 / 默认不比 payload）+ 核心约束（不判断变好变坏）+ 输出契约 + 测试计划 |
 | [`16-session-merge.md`](16-session-merge.md) | **多会话合并的设计裁决**：三个技术问题（用哪个时钟 / 同名 topic 怎么表示 / 去重按什么）+ 核心约束（不判断数据对错）+ 局限（时钟偏差、跳变被抹平）+ 输出契约 + 测试计划 |
-- [`17-comment-style.md`](17-comment-style.md) —— **注释规范（可执行模板）**：类级三项必填、状态机转化表、成员变量三要素、复杂函数 step 分解
+| [`17-comment-style.md`](17-comment-style.md) | **注释规范（可执行模板）**：类级三项必填、状态机转化表、成员变量三要素、复杂函数 step 分解 |
 | [`handoff-readme.md`](handoff-readme.md) | 历史：本项目早期的"文档集索引"（已由根 README 取代） |
 
 ---

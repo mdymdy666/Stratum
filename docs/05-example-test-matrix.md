@@ -6,6 +6,10 @@
 > * `tests/` 下的测试覆盖**大数据量 / 随机 / 真实场景**三类
 >
 > 状态图例：✅ 完成并实测 · 🚧 进行中 · ⬜ 未开始
+>
+> **2026-10-19 更新**：examples 矩阵仍然准确（10 个文件、4439 行，逐一 `wc -l` 复核）；
+> 但 §三 的 `tests/` 目录清单与 ctest 数字已严重过时 —— 实际 **75 个测试源文件 / 70 个 ctest 用例**，
+> 其中 `tests/unit/` 已从 3 个增至 **18 个**。已在 §三 就地更正并保留原表。
 
 ---
 
@@ -58,10 +62,15 @@
 
 **已有 ctest（38 个源文件）分类**：
 
+> **2026-10-19 更新**：实际为 **75 个测试源文件、70 个 ctest 用例**（`ctest --test-dir build -N`）。
+> 下表各目录的数量已按实测更新；原"38 个"是 2026-10-14 的规模。
+
 | 目录 | 文件 | 性质 |
 |---|---|---|
-| `tests/unit/` | `test_ack_bitmap` `test_storage_contract` `test_time_key` | 单元 |
-| `tests/integration/` | `test_record_replay` `test_record_replay_v2` `test_timeline_basic` `test_timeline_v2` | 集成 |
+| `tests/unit/` | **18 个**（`test_ack_bitmap` `test_storage_contract` `test_time_key` `test_probe*`×6 `test_control_events` `test_session_metadata` `test_pruned_ranges` …） | 单元 |
+| `tests/integration/` | **20 个**（`test_record_replay*` `test_timeline_*` `test_diff*` `test_merge` `test_io_context` `test_metrics_business` `test_verify_business` `test_xcheck_verify_diff` …） | 集成 |
+| `tests/types/` | 3 个（`test_types_serializer` `test_dynamic_value` `test_json_serializer`） | 单元 |
+| `tests/protocol/` | `test_protocol_backend` | 集成 |
 | `tests/random/` | `test_lsm_v2_random` `test_random_ops` | 随机 |
 | `tests/real/` | `test_lsm_v2_real` `test_real_sensor_data` | 真实场景 |
 | `tests/review/` | 12 个（并发/队列/快照/WAL 损坏/元数据…） | 回归 |
