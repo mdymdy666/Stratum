@@ -113,6 +113,54 @@ struct EngineStats {
 //   - 不存在"抛异常表示失败"的路径；一律通过 Status 返回。
 //   - 只有内存分配失败（std::bad_alloc）允许抛出。
 // ---------------------------------------------------------------------------
+/// @brief 存储后端插件接口（SPI）—— Stratum 与任何存储实现之间的**唯一契约**。
+///
+/// @par 模块定位
+/// 这是整个存储层的**抽象边界**。上层的 `TimelineImplV2` 只认识本接口，
+/// 不知道底下是 LSM、内存表还是测试桩。
+///
+/// 本头文件里的 6 个类型构成完整契约，关系如下：
+///
+/// ```
+/// IStorageEngineFactory  ──Create()──▶  IStorageEngine
+///        │                                    │
+///        │ Name() / ConfigSchema()            │ Open/Close
+///        │                                    │ Put/PutBatch/Get/Delete/DeleteRange
+///        │                                    │ NewIterator / Snapshot
+///        ▼                                    ▼
+///   配置里选后端                     Snapshot（时间点读的锚）
+///                                     Iterator（有序遍历）
+///                                     ReadOptions / WriteOptions（每次调用的开关）
+///                                     EngineStats（可观测性）
+/// ```
+///
+/// @par 上层服务（按文件点名）
+///  · `src/src/core/timeline_impl_v2.cc` —— **唯一的生产使用者**（经 `StratumDB` 间接调用）
+///  · `src/src/core/timeline_impl.cc`    —— V1 实现（历史遗留，仍用同一接口）
+///  · `src/src/storage/memory/memory_engine.cc` —— 测试用的内存后端
+///  · `tests/unit/test_storage_contract.cc` —— **契约测试**（任何新后端都必须过它）
+///
+/// @par 与相邻类的边界（这些事**不**在本接口做）
+///  · **不做** 时间轴语义（TimeKey 编码、话题注册、区间查询）—— 那是 `StratumDB`
+///  · **不做** 压缩/合并策略 —— 那是后端自己的实现细节
+///  · **不做** 跨进程锁 —— 由后端实现（LSM 用 LOCK 文件）
+///  · **不做** 事务的跨批次保证 —— 只有 `PutBatch` 是原子的，两次 `PutBatch` 之间不保证
+///
+/// @par 两个刻意保持的设计
+/// **① 接口刻意窄**：不暴露 level / SSTable / memtable / compaction 等任何后端概念。
+///   代价是某些后端特有的优化用不上；收益是"实现一个后端"的门槛极低
+///   （内存后端只有 174 行）。
+///
+/// **② 快照是一等公民**（`Snapshot`，不是可选优化）：
+///   Stratum 的"定点查询"（`query --state-at`）**依赖**快照语义 ——
+///   只要快照未 Release，其视图内的历史版本不得被回收。
+///   任何后端若无法提供这个保证，**不适合作为 Stratum 的存储后端**。
+///
+/// @par 实现一个新后端的最小要求
+/// 1. 通过 `test_storage_contract.cc`（契约测试）
+/// 2. `Snapshot` 的生死规则（见该类的注释）
+/// 3. `PutBatch` 的原子性
+/// 4. `DeleteRange` 的 [begin, end) 半开语义
 class IStorageEngine {
  public:
   virtual ~IStorageEngine() = default;
@@ -235,6 +283,30 @@ using StorageEnginePtr = std::unique_ptr<IStorageEngine>;
 //   2. 实现 IStorageEngineFactory
 //   3. 用 STRATUM_REGISTER_STORAGE_ENGINE 宏注册
 // ---------------------------------------------------------------------------
+/// @brief 存储后端的工厂 —— 让"选哪个后端"成为**配置项**而不是编译期决定。
+///
+/// @par 模块定位
+/// 配置文件里写 `storage.engine = lsm`，运行时由工厂创建对应实现。
+/// 这样同一个二进制可以跑 LSM（生产）、memory（测试）、或将来别的后端。
+///
+/// @par 上层服务
+///  · `src/cli/cmd_config.cc` —— 用 `ConfigSchema()` 生成配置帮助并校验
+///  · `src/src/storage/factory.cc`（若存在）—— 注册表查找
+///
+/// @par 与相邻类的边界
+///  · **不做** 单例 —— 工厂本身无状态，可以随便建
+///  · **不做** 缓存实例 —— 每次 `Create()` 返回新对象（调用方决定复用与否）
+///  · **不做** 打开数据库 —— `Create()` 只造对象，`Open()` 才碰磁盘
+///    （这个分离很重要：让"配置校验"与"真去开库"成为两件可分开的事）
+///
+/// @par `ConfigSchema()` 的格式约定
+/// 每项一行 `name:type:default:description`，例如：
+/// ```
+/// "write_buffer_mb:int:64:写缓冲区大小（MB）"
+/// "compression:string:snappy:压缩算法（none|snappy|zstd）"
+/// ```
+/// 用途有二：① `config explain` 打印可选项 ② `config validate` 校验配置项合法性。
+/// **默认实现返回空**（表示该后端没有特有配置项）。
 class IStorageEngineFactory {
  public:
   virtual ~IStorageEngineFactory() = default;
