@@ -10,6 +10,46 @@
 
 ---
 
+## 0.0 本文档的覆盖范围（2026-10-19 补充）
+
+**本文档详细规定的命令只有 5 个**：
+
+`record`（§3）、`play`（§4）、`query`（§5）、`prune`（§6）、`ctl`（§7）。
+
+另有 §1（通用参数与退出码）、§2（选择器 BNF）、§8（横切规范）适用于全部命令。
+
+### 不在本文档范围内的命令
+
+| 命令 | 规格在哪 |
+|---|---|
+| `session list` / `session info` | 无专题文档；以 `stratum session` 的行为与代码为准 |
+| **`session merge`** | [`16-session-merge.md`](16-session-merge.md)（三个裁决 + 输出契约 + 退出码） |
+| **`diff`** | [`15-session-diff.md`](15-session-diff.md)（三个裁决 + 分桶 + payload 三档） |
+| **`verify`**（含 `--business-signals`） | [`14-verify-business-layer.md`](14-verify-business-layer.md)（含「不下结论」原则） |
+| **`probe`** / 埋点 API | [`13-probe-requirements.md`](13-probe-requirements.md) |
+| `io` / `doctor` / `metrics` / `types` / `config` | **尚无专题文档** —— 只有代码与 `--help` |
+
+### 这个缺口是怎么来的
+
+`docs/08` 写于 2026-10-14，当时只规划了 5 个命令。之后陆续加了
+`session` / `verify` / `types` / `ctl` / `io` / `doctor` / `metrics` / `probe` / `diff` / `session merge`，
+每加一个都写了专题文档（13~16），但**没有回头补 `docs/08` 的总表**。
+
+> **2026-10-19 记录为待办**：为 `io` / `doctor` / `metrics` / `types` / `config` 补规格章节。
+> 优先级低于功能开发，但会让 `--version` 里的 "CLI 规范: docs/08-cli-spec.md" 这句话变得可信。
+
+### 判断"当前实际支持什么"的正确方式
+
+```bash
+stratum --help                  # 14 组命令一览（2026-10-19 已修正，此前只列 5 组）
+stratum <命令> <必填参数>        # 缺参数时的报错里会列出可用选项
+```
+
+注意：`stratum <命令> --help` **不可用**（返回 2），见
+[`07-cli-design.md`](07-cli-design.md) §0.0 的说明。
+
+---
+
 ## 0 三条元规则（本设计的总纲）
 
 | 规则 | 含义 | 违反的后果 |
