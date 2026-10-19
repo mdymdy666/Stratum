@@ -258,35 +258,54 @@ MemoryIterator::MemoryIterator(
     std::vector<std::pair<std::string, std::string>> entries)
     : entries_(std::move(entries)) {}
 
-bool MemoryIterator::Valid() const { return pos_ < entries_.size(); }
+bool MemoryIterator::Valid() const {
+  return valid_ && pos_ < entries_.size();
+}
 
 void MemoryIterator::Next() {
   if (Valid()) ++pos_;
 }
 
 void MemoryIterator::Prev() {
-  if (pos_ > 0) --pos_;
+  // 【越过 first 必须变无效】否则 `while (Valid()) Prev();` 死循环 ——
+  // pos_ == 0 是"指向第一个元素"的合法位置，不能再减，
+  // 但只看 pos_ < size 的话 Valid() 会一直 true。
+  // 这条由契约测试 StoreContract.IteratorSeekAndPrev 抓到（Memory 与 LSM 同款）。
+  if (!Valid()) return;
+  if (pos_ > 0) {
+    --pos_;
+  } else {
+    valid_ = false;   // 已在 first，再往回走 → 越界
+  }
 }
 
 void MemoryIterator::Seek(const std::string& target) {
   pos_ = 0;
+  valid_ = true;
   while (Valid() && entries_[pos_].first < target) ++pos_;
 }
 
 void MemoryIterator::SeekForPrev(const std::string& target) {
   pos_ = 0;
+  valid_ = true;
   size_t best = entries_.size();
   while (pos_ < entries_.size() && entries_[pos_].first <= target) {
     best = pos_;
     ++pos_;
   }
   pos_ = best;
+  // best == size 表示"没有任何 key <= target" → 定位失败
+  valid_ = (best < entries_.size());
 }
 
-void MemoryIterator::SeekToFirst() { pos_ = 0; }
+void MemoryIterator::SeekToFirst() {
+  pos_ = 0;
+  valid_ = true;
+}
 
 void MemoryIterator::SeekToLast() {
   pos_ = entries_.empty() ? 0 : entries_.size() - 1;
+  valid_ = !entries_.empty();
 }
 
 std::string MemoryIterator::key() const {

@@ -156,6 +156,17 @@ class MemoryIterator : public IStorageEngine::Iterator {
  private:
   std::vector<std::pair<std::string, std::string>> entries_;
   size_t pos_ = 0;
+
+  // 迭代器是否定位在有效元素上。
+  //
+  // 【为什么需要它】只靠 `pos_ < entries_.size()` 无法表达"越过 first"：
+  // `Prev()` 在 `pos_ == 0` 时无路可退，但 `pos_ = 0` 本身是合法位置
+  // （指向第一个元素）。于是"往回走到头"与"停在第一个"无法区分 ——
+  // 而 `while (Valid()) Prev();` 就会**死循环**。
+  // 这是存储契约测试（StoreContract.IteratorSeekAndPrevBothEngines）暴露的：
+  // MemoryIterator 的反向遍历无法终止。
+  bool valid_ = true;
+
   Status status_;
 };
 

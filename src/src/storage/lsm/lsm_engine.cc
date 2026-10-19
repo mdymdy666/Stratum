@@ -755,18 +755,28 @@ class LsmIterator : public IStorageEngine::Iterator {
     pos_ = 0;
   }
 
-  bool Valid() const override { return pos_ < entries_.size(); }
+  bool Valid() const override { return valid_ && pos_ < entries_.size(); }
 
   void Next() override {
     if (Valid()) ++pos_;
   }
 
   void Prev() override {
-    if (pos_ > 0) --pos_;
+    // 【越过 first 必须变无效】否则 `while (Valid()) Prev();` 死循环 ——
+    // pos_ == 0 是"指向第一个元素"的合法位置，不能再减，但 Valid() 只看
+    // pos_ < size 会一直 true。契约测试 StoreContract.IteratorSeekAndPrev
+    // 就是靠这条断言抓到的。
+    if (!Valid()) return;
+    if (pos_ > 0) {
+      --pos_;
+    } else {
+      valid_ = false;   // 已在 first，再往回走 → 越界
+    }
   }
 
   void Seek(const std::string& target) override {
     pos_ = 0;
+    valid_ = true;
     while (pos_ < entries_.size() && entries_[pos_].user_key < target) {
       ++pos_;
     }
@@ -778,13 +788,21 @@ class LsmIterator : public IStorageEngine::Iterator {
     while (pos_ < entries_.size() && entries_[pos_].user_key <= target) {
       best = pos_;
       ++pos_;
+      valid_ = (pos_ < entries_.size());
     }
     pos_ = (best == entries_.size()) ? entries_.size() : best;
   }
 
-  void SeekToFirst() override { pos_ = 0; }
+  void SeekToFirst() override {
+    pos_ = 0;
+    valid_ = true;
+  }
   void SeekToLast() override {
+
     pos_ = entries_.empty() ? 0 : entries_.size() - 1;
+
+    valid_ = !entries_.empty();
+
   }
 
   std::string key() const override {
@@ -800,6 +818,8 @@ class LsmIterator : public IStorageEngine::Iterator {
   std::string begin_;
   std::string end_;
   size_t pos_ = 0;
+
+  bool valid_ = true;   // 见 Prev() 的注释：区分"越过 first"与"停在 first"
 };
 
 

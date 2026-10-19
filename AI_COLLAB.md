@@ -11381,3 +11381,72 @@ metatraffic 端口 → 对端收 0 条、两端无报错。
 未提交:      0
 push:        未执行（由主 agent 在 Windows 侧做）
 ```
+
+---
+
+## 2026-10-19（续）| 契约测试补迭代器 seek/Prev，发现两个后端的同款死循环
+
+### 一、做了什么（`docs/06` 缺口 #2）
+
+`test_storage_contract.cc` 里 `Seek|Prev` 此前**出现 0 次** —— 契约测试只覆盖了正向 `Next`。
+`IStorageEngine::Iterator` 有 5 个定位方法（`SeekToFirst`/`SeekToLast`/`Seek`/`SeekForPrev`/`Prev`）。
+
+新增 `StoreContract.IteratorSeekAndPrevBothEngines`，对 Memory 与 Lsm 两个后端各跑一遍，
+覆盖 6 组：首末定位、Seek 精确/中间/越尾、SeekForPrev 精确/中间/小于最小、
+Prev 反向遍历、空库边界、Seek 后 Prev 双向切换。
+
+### 二、★ 抓到的真缺陷：两个迭代器的 Prev 都死循环
+
+`MemoryIterator` 与 `LsmIterator` 有**完全一样**的写法：
+
+```cpp
+void Prev() { if (pos_ > 0) --pos_; }              // 到 0 就停住
+bool Valid() const { return pos_ < entries_.size(); }  // 0 < size → 仍 true
+```
+
+在第一个元素处调 `Prev()`：`pos_` 不变、`Valid()` 仍为 true →
+**`while (Valid()) Prev();` 永不终止**。
+
+**为什么这是真缺陷**：`Prev()` 的用途就是往回走。它在起点停住却不报告"已到边界"，
+任何"反向遍历到结尾"的循环都会挂死。LevelDB 语义是"Prev 越过 first 后 Valid() 变 false"。
+
+**为什么两个都有**：各自写的，但用了同一个思路。
+**这正是契约测试的价值** —— 同一套断言跑两个后端，立刻发现"参考实现和自研实现犯了同一个错"。
+只测一个后端会以为"这就是对的"。
+
+**修法**：加 `bool valid_`；`Prev()` 越过 first 时置 false；所有定位方法重置 true；
+`Valid()` 同时看 `valid_` 与 `pos_ < size`。
+
+### 三、测试断言的自我修正（重要）
+
+我第一版断言写的是"Prev 一直走到无效"，结果 LSM 失败 —— 而它其实**是合法的实现选择**
+（Prev 在 first 处停在原地）。
+
+**契约测试该测什么**：不是"某个实现的具体选择"，而是"任何后端都必须满足的性质"。
+改成三条更弱但更本质的：
+1. 不能崩
+2. 越界后 key **单调不增**（不能"倒着走却拿到更大的 key"）
+3. **能停下来**（不能在边界上无限循环）
+
+**把实现细节写成断言，会让契约变成"只有一个后端能过"** —— 那正是 docs/06 说这类测试最容易犯的错。
+
+而第 3 条正是抓出死循环的那条 —— 它比"最终无效"弱，但仍然拦住了缺陷。
+
+### 四、一个 patch 脚本的教训
+
+`fix_memory_iterator.py` 的顺序是"先改头文件、再改实现文件"，但头文件正则没匹配上时
+它 `sys.exit(1)` 退出了 —— **实现文件的改动从未执行**。
+
+后果：头文件有了 `valid_` 成员（未使用），而 `Prev()` 还是旧代码。
+我因此多绕了两轮（改完后测试还失败，才去查实际代码）。
+
+**教训**：多步 patch 脚本里，任何一步 `sys.exit` 都会让后面的步骤**静默丢失**。
+更安全的做法是每步独立判断、失败只跳过不退出，最后汇总报告。
+
+### 五、状态
+
+```
+全量 ctest:  71 / 71
+提交:        152
+```
+

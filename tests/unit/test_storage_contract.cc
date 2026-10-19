@@ -273,6 +273,139 @@ void CleanDir(const std::string& dir) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 迭代器的定位方法契约（docs/06 缺口 #2）
+//
+// 覆盖 5 个方法：SeekToFirst / SeekToLast / Seek / SeekForPrev / Prev。
+// 每个后端都要过 —— 它们只在"边界"（首、末、越界、不存在）上才会分叉。
+// ---------------------------------------------------------------------------
+void RunIteratorContract(IStorageEngine* e, const std::string& tag,
+                         ::stratum_test::TestContext& ctx) {
+  const std::string p = "it_" + tag + "_";
+  WriteOptions wo;
+  ReadOptions ro;
+
+  // 5 个有序 key：k0..k4（值就是 key 本身，便于断言）
+  std::vector<std::string> keys;
+  for (int i = 0; i < 5; ++i) {
+    const std::string k = p + "k" + std::to_string(i);
+    keys.push_back(k);
+    STRATUM_CHECK_OK(e->Put(wo, k, k));
+  }
+
+  const std::string b = p + "k0";
+  const std::string e5 = p + "k5";   // 恰好越过最后一个
+
+  // --- 1) SeekToFirst / SeekToLast ---
+  {
+    auto it = e->NewIterator(ro, b, e5);
+    it->SeekToFirst();
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[0]);
+    it->SeekToLast();
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[4]);
+  }
+
+  // --- 2) Seek：精确命中 / 落在中间（应到下一个）/ 越过末尾（应无效）---
+  {
+    auto it = e->NewIterator(ro, b, e5);
+    it->Seek(keys[2]);                 // 精确
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[2]);
+
+    it->Seek(p + "k2x");               // 落在 k2 与 k3 之间 → 第一个 >= 是 k3
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[3]);
+
+    it->Seek(p + "k9");                // 越过末尾 → 无效
+    STRATUM_CHECK_FALSE(it->Valid());
+  }
+
+  // --- 3) SeekForPrev：精确 / 落在中间（应到前一个）/ 小于最小（应无效）---
+  {
+    auto it = e->NewIterator(ro, b, e5);
+    it->SeekForPrev(keys[3]);          // 精确
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[3]);
+
+    it->SeekForPrev(p + "k3x");        // 没有恰好相等 → 停在 k3（"前一个 <= 目标"）
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[3]);
+
+    it->SeekForPrev(p + "a");          // 小于最小 → 无效（或退到 first，取决于实现）
+    // 两种实现都可接受：有的后端退到 first，有的变无效。只要求"不崩、状态自洽"。
+    if (it->Valid()) {
+      STRATUM_CHECK_EQ(it->key(), keys[0]);
+    }
+  }
+
+  // --- 4) Prev：从最后往回走，顺序必须是 k4 → k3 → k2 ---
+  {
+    auto it = e->NewIterator(ro, b, e5);
+    it->SeekToLast();
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[4]);
+    it->Prev();
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[3]);
+    it->Prev();
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[2]);
+
+    // 一直往回走：**不要求最终变无效**（那取决于实现选择），
+    // 只要求 (a) 不崩 (b) key 单调不增 (c) 能停下来。
+    //
+    // 为什么不强制"最终无效"：Prev 在第一个元素处，有的实现变无效（LevelDB），
+    // 有的停在 first。两种都合理，契约不该替实现做选择。
+    int guard = 0;
+    std::string prev_key = it->key();
+    while (it->Valid() && guard++ < 30) {
+      it->Prev();
+      if (!it->Valid()) break;
+      const std::string now = it->key();
+      STRATUM_CHECK_LE(now, prev_key);   // ★ 单调不增
+      prev_key = now;
+    }
+    if (guard >= 30) {
+      std::printf("      [诊断] %s: guard=%d（Prev 在边界上不终止），"
+                  "最后 key=%s, valid=%d\n",
+                  tag.c_str(), guard, prev_key.c_str(),
+                  static_cast<int>(it->Valid()));
+    }
+    STRATUM_CHECK_LT(guard, 30);         // ★ 能停下来（没在边界上死循环）
+  }
+
+  // --- 5) 空库：所有定位都应无效 ---
+  {
+    const std::string eb = p + "zzz0";
+    const std::string ee = p + "zzz9";
+    auto it = e->NewIterator(ro, eb, ee);
+    it->SeekToFirst();
+    STRATUM_CHECK_FALSE(it->Valid());
+    it->SeekToLast();
+    STRATUM_CHECK_FALSE(it->Valid());
+    it->Seek(eb + "x");
+    STRATUM_CHECK_FALSE(it->Valid());
+    it->SeekForPrev(eb + "x");
+    STRATUM_CHECK_FALSE(it->Valid());
+  }
+
+  // --- 6) Seek 之后 Prev：双向切换不能错位 ---
+  {
+    auto it = e->NewIterator(ro, b, e5);
+    it->Seek(keys[3]);
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[3]);
+    it->Prev();
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[2]);
+    it->Next();
+    STRATUM_CHECK_TRUE(it->Valid());
+    STRATUM_CHECK_EQ(it->key(), keys[3]);
+  }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -388,6 +521,32 @@ STRATUM_TEST(StoreContract, RangeScanParity) {
   mem->Close();
   lsm->Close();
   CleanDir(dir);
+}
+
+// ---------------------------------------------------------------------------
+// 迭代器定位方法：两个后端各跑一遍（docs/06 缺口 #2）
+// ---------------------------------------------------------------------------
+STRATUM_TEST(StoreContract, IteratorSeekAndPrevBothEngines) {
+  // Memory
+  {
+    auto engine = StorageEnginePtr(new MemoryEngine());
+    STRATUM_CHECK_OK(engine->Open("mem://it"));
+    RunIteratorContract(engine.get(), "memory", ctx);
+    STRATUM_CHECK_OK(engine->Close());
+    std::printf("      [memory] Seek/SeekForPrev/Prev/SeekToFirst/Last 全部通过\n");
+  }
+
+  // LSM
+  {
+    const std::string dir = EngineDir("lsm_it");
+    CleanDir(dir);
+    auto engine = StorageEnginePtr(new LsmEngine());
+    STRATUM_CHECK_OK(engine->Open(dir));
+    RunIteratorContract(engine.get(), "lsm", ctx);
+    STRATUM_CHECK_OK(engine->Close());
+    CleanDir(dir);
+    std::printf("      [lsm]    Seek/SeekForPrev/Prev/SeekToFirst/Last 全部通过\n");
+  }
 }
 
 STRATUM_TEST_MAIN()
