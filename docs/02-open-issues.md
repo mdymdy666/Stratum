@@ -5,7 +5,7 @@
 >
 > 更新于 2026-10-08。**区分"确证的缺陷"、"未验证的空白"与"环境限制"**，
 > 不把未验证说成有问题。相关：[`01-resolved-issues.md`](01-resolved-issues.md)、
-> [`../../design/15-test-report.md`](../../design/15-test-report.md)。
+> [`../../design/15-test-report.md`](../design/15-test-report.md)。
 
 ---
 

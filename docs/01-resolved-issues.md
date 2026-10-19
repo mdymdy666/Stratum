@@ -1,7 +1,7 @@
 # 01 · 已解决的问题清单（现象 → 根因 → 修复 → 验证）
 
 > 来源：`AI_COLLAB.md` 续 16~36 的逐轮记录。**每条都有实测证据**，不是推测。
-> 相关的根因分析见 [`../../design/12-rtps-interop-rootcause.md`](../../design/12-rtps-interop-rootcause.md)；
+> 相关的根因分析见 [`../../design/12-rtps-interop-rootcause.md`](../design/12-rtps-interop-rootcause.md)；
 > 验证脚本见 [`03-verification-matrix.md`](03-verification-matrix.md)。
 
 ---

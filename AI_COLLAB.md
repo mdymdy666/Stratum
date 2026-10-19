@@ -10850,3 +10850,78 @@ grep -oE "stratum [a-z]+" docs/*.md | sed 's/.*stratum //' | sort -u \
 光写对路径不够，因为项目历史里反复出现过 E: 路径。
 
 后续改由我自己完成，所以本轮的产出是"少而准"而不是"多而全"。
+
+---
+
+## 2026-10-19（续）| 注释扩到 10 个类 + 文档断链修复 + 一致性检查工具
+
+### 一、注释：从 4 个类扩到 10 个类
+
+新增 6 个（都在存储层）：
+
+| 类 | 补了什么 |
+|---|---|
+| `IStorageEngine` | 6 个类型的 ASCII 关系图（Factory→Engine→Snapshot/Iterator/Options/Stats）；"实现新后端的最小要求"4 条 |
+| `IStorageEngineFactory` | `Create()` 只造对象不碰磁盘，这个分离让"校验配置"与"真去开库"分开 |
+| `LsmSnapshot` | 澄清最易混的一点：`LsmSnapshot`（内存、进程内、一致性视图）vs `StratumDB::RetentionPoint`（持久化、跨重启、防淘汰）|
+| `SSTable` | 「追加记录 + 读时建索引」的取舍结论（打开要扫全文件，但 SSTable 数量少、单文件不大）|
+| `LsmEngine` | 三个必须理解的约束：①`PutBatch` 先 WAL 后 MemTable，「成功」≠已落 SSTable ②`DeleteRange` 只写 tombstone，磁盘不会立刻降 ③Compaction 在后台，造成写入延迟抖动（LSM 固有代价）|
+| `LsmEngineFactory` | 同 Factory 的职责说明 |
+
+**跳过 `probe.h` 的理由**：它已有需求编号（PR-01~04）+ 5 条设计要点 +
+关于负载格式的务实决定 + 用法示例（45% 密度），**超出规范要求**。
+
+### 二、文档：修 2 处断链 + 发现被漏掉的 27 篇
+
+**断链根因**：`docs/01` 与 `docs/02` 写 `../../design/xxx.md`。从 `docs/` 出发：
+```
+docs/ → ../  = Stratum/          ← 这里才有 design/（27 个文件）
+docs/ → ../../ = CodexWorkSpace/  ← 没有 design/
+```
+**多写了一级 `../`**。已修。
+
+**顺带发现**：`design/` 有 **27 篇**，比 `docs/`（20 篇）还多。
+本轮之前的盘点**只覆盖了 `docs/`**，漏了这一大块 —— 已写进 `docs/18` 的未完成清单。
+
+推测原因：两个目录的定位没写在任何地方，新读者不知道看哪个。
+建议（未做）：在 `docs/README.md` 里说明分工 ——
+「`docs/` = 设计与规格（要遵守的）；`design/` = 根因分析与测试报告（历史证据）」。
+
+### 三、新增自动化检查工具：`tools/check_doc_links.py`
+
+三条可自动验证的检查，改完文档就能跑：
+
+```bash
+python3 tools/check_doc_links.py          # 全部
+python3 tools/check_doc_links.py --links  # 只查断链
+```
+
+| 检查 | 抓到了什么 |
+|---|---|
+| 相对链接（48 个 md） | 2 处断链（多写一级 `../`）|
+| README 索引完整性 | 通过（docs/ 下每篇都被索引）|
+| 幽灵命令 | 5 个（`daemon`/`plan`/`stats`/`status`/`watch`，全是 docs/07 的设计规划）|
+
+**幽灵命令检查是这次最有价值的** —— 一条命令就能找出"文档提到但代码没有"的命令。
+本轮最初就是靠它发现那 5 个。
+
+### 四、本轮踩坑（第 3 条"校验自身会错"）
+
+**① 我的链接检查器把示例文字当成真链接**
+
+`docs/18` 的表格里写了 `` `[文字](路径)` `` 作为说明，检查器把它解析成真链接并报断链。
+修法：说明文字里不要写形如链接的字面量。
+
+**② `python3 - <<'PY'` 内联 heredoc 又被 shell 破坏**（第 14 次）
+含中文方括号的 heredoc 在 `wsl bash -lc` 里被 PowerShell/bash 双层解析搞坏。
+落盘成 `.py` 文件后正常 —— 这条纪律已经写了很多次，还是会图省事。
+
+### 五、状态
+
+```
+全量 ctest:  70 / 70
+提交:        141
+本轮注释类:  10 个（core 4 + storage 6）
+检查工具:    tools/check_doc_links.py（3 条检查，全部通过）
+```
+
