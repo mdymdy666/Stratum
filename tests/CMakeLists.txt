@@ -275,3 +275,8 @@ target_compile_definitions(test_merge PRIVATE
     MERGE_CLI_PATH="${CMAKE_BINARY_DIR}/stratum")
 target_include_directories(test_merge PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 set_tests_properties(test_merge PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+
+# Player 控制面（docs/06 缺口 #1）：Percent 边界 / RequestStop 协作停止 /
+# GetProgress 单调性 / 空闲态。此前零覆盖，而"停不下来"只在并发时序下暴露。
+stratum_add_test(test_player_control unit/test_player_control.cc unit core)
+set_tests_properties(test_player_control PROPERTIES TIMEOUT 120)
