@@ -408,6 +408,104 @@ std::vector<uint8_t> BuildDataPacket(const DataPacketParams& p) {
 }
 
 // ---------------------------------------------------------------------------
+// 批量 DATA（见头文件里的收益测算与约束说明）
+//
+// 与 BuildDataPacket 的**唯一**结构差异：
+//   Header + INFO_DST 只写一次，然后循环追加 N 个 (INFO_TS + DATA)。
+// 其余子消息布局逐字节相同 —— 对端是按子消息解析的，不关心一个报文里有几条。
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> BuildDataPacketBatch(
+    const std::vector<DataPacketParams>& samples) {
+  if (samples.empty()) return {};
+
+  // --- 先算总容量：Header 余量 + 每条 (INFO_TS 12 + DATA 24 + payload) ---
+  size_t need = 512;
+  for (const auto& s : samples) need += s.payload.size() + 36;
+  if (need > 60000) {
+    // UDP 单包实际可用 ~64KiB，留余量。超了让调用方拆批 ——
+    // 不在这里截断（截断会发出"少了几条"的报文，而调用方以为全发了）。
+    std::fprintf(stderr,
+                 "[packet] 批量过大：%zu 条需要 %zu 字节（上限 60000）。"
+                 "调用方应拆成更小的批。\n",
+                 samples.size(), need);
+    std::fflush(stderr);
+    return {};
+  }
+
+  const uint32_t cap = static_cast<uint32_t>(need);
+  CDRMessage_t msg(cap);
+  msg.msg_endian = LITTLEEND;
+  // ★ 收益来源：这一段只写一次，而单发是每条一次。
+  WriteHeaderAndDst(&msg, samples[0].prefix, nullptr);
+
+  for (const auto& p : samples) {
+    // 单条子消息的 octetsToNextHeader 是 16 位 —— 逐条检查。
+    //
+    // 【当前是防御性代码】总长上限 60000 < 单条上限 65535，所以任何单条超界的
+    // 批次在上面的总长检查就被拒了，走不到这里。保留它的理由：若将来把总长
+    // 提到 64KiB+（例如走 TCP/共享内存传输），这条会成为唯一防线。
+    // 测试里已诚实标注这一点（见 test_rtps_packet_utils.cc 的 OversizedSingleSample...）。
+    constexpr size_t kMaxDataSubmessageBody = 65535;
+    if (p.payload.size() + 20 > kMaxDataSubmessageBody) {
+      std::fprintf(stderr,
+                   "[packet] 批量内单条过大：payload=%zu 字节，需要 DATA_FRAG"
+                   "（批量接口不支持分片）。整批放弃，不发畸形报文。\n",
+                   p.payload.size());
+      std::fflush(stderr);
+      return {};
+    }
+
+    // --- INFO_TS（每条自己的源时间戳，不能共用）---
+    CDRMessage::addOctet(&msg, kSubInfoTs);
+    CDRMessage::addOctet(&msg, 0x01);
+    CDRMessage::addUInt16(&msg, 8);
+    {
+      int32_t ts_sec = 0;
+      uint32_t ts_frac = 0;
+      if (p.source_ts_ns > 0) {
+        ts_sec = static_cast<int32_t>(p.source_ts_ns / 1000000000LL);
+        const uint64_t rem = static_cast<uint64_t>(p.source_ts_ns % 1000000000LL);
+        ts_frac = static_cast<uint32_t>((rem << 32) / 1000000000ULL);
+      }
+      CDRMessage::addInt32(&msg, ts_sec);
+      CDRMessage::addUInt32(&msg, ts_frac);
+    }
+
+    // --- DATA（每条自己的 writerId 与 SN）---
+    CDRMessage::addOctet(&msg, kSubData);
+    CDRMessage::addOctet(&msg, 0x05);
+    const uint32_t size_pos = msg.pos;
+    CDRMessage::addUInt16(&msg, 0);
+    const uint32_t body_start = msg.pos;
+    CDRMessage::addUInt16(&msg, 0);    // extraFlags
+    CDRMessage::addUInt16(&msg, 16);   // octetsToInlineQos（DATA=16）
+    EntityId_t unknown(ENTITYID_UNKNOWN);
+    CDRMessage::addEntityId(&msg, &unknown);
+    EntityId_t w(p.writer_entity);
+    CDRMessage::addEntityId(&msg, &w);
+    SequenceNumber_t seq(static_cast<int32_t>(p.sn >> 32),
+                         static_cast<uint32_t>(p.sn & 0xFFFFFFFF));
+    CDRMessage::addSequenceNumber(&msg, &seq);
+
+    if (!p.payload.empty()) {
+      // 【不能忽略返回值】容量不足时 addData 返回 false 且不写入，
+      // 会发出"只有头没有负载"的 DATA（本项目在 8 KiB 负载上踩过）。
+      if (!CDRMessage::addData(&msg,
+                               reinterpret_cast<const octet*>(p.payload.data()),
+                               static_cast<uint32_t>(p.payload.size()))) {
+        std::fprintf(stderr,
+                     "[packet] 批量 addData 失败: payload=%zu cap=%u pos=%u\n",
+                     p.payload.size(), cap, msg.pos);
+        std::fflush(stderr);
+        return {};
+      }
+    }
+    BackfillSubmessageLength(&msg, size_pos, body_start);
+  }
+  return std::vector<uint8_t>(msg.buffer, msg.buffer + msg.length);
+}
+
+// ---------------------------------------------------------------------------
 // DATA_FRAG（分片发送）
 //
 // 子消息布局（RTPS 2.3 §9.6.3.6）：

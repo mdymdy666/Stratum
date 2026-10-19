@@ -179,6 +179,30 @@ struct DataPacketParams {
 
 std::vector<uint8_t> BuildDataPacket(const DataPacketParams& p);
 
+// ---------------------------------------------------------------------------
+// 批量 DATA：一个 Message 里装多个 DATA 子消息（RTPS 2.3 §8.3.3 允许）。
+//
+// 【省带宽的原理】Message Header(20B) + INFO_DST(16B) 只付**一次**：
+//     单发 N 条: N × (36 + 12 + 24 + payload)  = N × (72 + payload)
+//     批量 N 条: 36 + N × (12 + 24 + payload)   = 36 + N × (36 + payload)
+//     净省 36 × (N-1) 字节；再加 (N-1) × 28 字节 IP/UDP 头（一次 sendto 一个包）
+//
+//   以 HelloWorld（payload 24 字节）为例，N=10：
+//     单发 960B → 批量 636B（省 34%）；算上 IP/UDP 则 1240B → 664B（省 46%）
+//
+// 【不同 topic 也能合】每个 DATA 子消息自带 writerId(4B) 与 SN(8B)，
+// 对端按 writerId 分发即可，不要求整个 Message 属于同一个 writer。
+//
+// 【约束】
+//  · 所有样本必须共用同一个 GuidPrefix（同一个 RTPS 参与者）；取 samples[0].prefix
+//  · 空输入返回空 —— 调用方应把空批次当 no-op，不要发空包
+//  · 整包总长限制 60000 字节、单条子消息限制 65535 字节；
+//    任一超界返回空并打印原因（**不截断、不发畸形报文**）
+//  · 不支持 DATA_FRAG（分片仍是单条的 BuildDataFragPackets 负责）
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> BuildDataPacketBatch(
+    const std::vector<DataPacketParams>& samples);
+
 // 【DATA_FRAG】把一个大样本切成多片，每片一个独立的 DATA_FRAG 子消息报文。
 //
 // 为什么需要：RTPS 的 DATA 子消息只能装 ~64KiB，而且即便装得下，

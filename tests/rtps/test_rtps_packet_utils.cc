@@ -17,6 +17,7 @@
 // 构造与解析互为镜像，任一侧偏离线上格式都会暴露。
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -358,6 +359,257 @@ STRATUM_TEST(RtpsPacket, BuildParseStress) {
   ctx.param_desc = "iterations=" + std::to_string(kIterations) +
                    " round_trip_ok=" + std::to_string(parsed_ok);
   STRATUM_CHECK_EQ(parsed_ok, static_cast<size_t>(kIterations));
+}
+
+// ---------------------------------------------------------------------------
+// 批量 DATA（一个 Message 装多个 DATA 子消息）
+//
+// 这组测试的**核心目的**不是"批量能跑"，而是证明三件事：
+//   ① N=1 时与单发逐字节相同 → 批量没有引入第二个实现
+//   ② 子消息序列正确（数量、id、每条的 INFO_TS 与 writerId/SN）
+//   ③ 两道边界真的挡住了畸形报文（不是"构造了但发出去坏了"）
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 扫描一个 RTPS Message 里的子消息序列，按 octetsToNextHeader 跳。
+// 返回 (id, 体长度) 列表；遇到长度越界立即停止（说明报文本身坏了）。
+struct SubMsg {
+  uint8_t id;
+  uint16_t body_len;
+  size_t off;   // 子消息头在报文中的偏移
+};
+
+std::vector<SubMsg> ScanSubmessages(const std::vector<uint8_t>& buf) {
+  std::vector<SubMsg> out;
+  size_t off = 20;   // 跳过 RTPS Message Header
+  while (off + 4 <= buf.size()) {
+    const uint8_t id = buf[off];
+    const uint16_t len = Rd16(buf.data() + off + 2);
+    out.push_back({id, len, off});
+    const size_t next = off + 4 + len;
+    if (next <= off || next > buf.size()) break;   // 防越界/死循环
+    off = next;
+  }
+  return out;
+}
+
+size_t CountId(const std::vector<SubMsg>& v, uint8_t id) {
+  size_t n = 0;
+  for (const auto& s : v) if (s.id == id) ++n;
+  return n;
+}
+
+// 从 DATA 子消息体里读 writerId（大端存储的 4 字节，用 EntityVal 解）
+uint32_t WriterIdOf(const std::vector<uint8_t>& buf, const SubMsg& s) {
+  const size_t body = s.off + 4;
+  return packet::EntityVal(buf.data() + body + 8);
+}
+
+// 从 INFO_TS 子消息体里读 (sec, frac)
+void TimeTsOf(const std::vector<uint8_t>& buf, const SubMsg& s,
+              uint32_t* sec, uint32_t* frac) {
+  const size_t body = s.off + 4;
+  *sec = Rd32(buf.data() + body);
+  *frac = Rd32(buf.data() + body + 4);
+}
+
+}  // namespace
+
+// ① 最强证据：N=1 时逐字节等于单发
+STRATUM_TEST(RtpsPacketBatch, SingleSampleMatchesSinglePacketByteForByte) {
+  packet::DataPacketParams p;
+  std::memcpy(p.prefix, kPrefix, 12);
+  p.writer_entity = packet::kEntityUserWriter;
+  p.sn = 0x0000000700000000ULL + 42;
+  p.payload = "ABCDEFGH";
+  p.source_ts_ns = 1700000000123456789LL;
+
+  const auto single = packet::BuildDataPacket(p);
+  const auto batch = packet::BuildDataPacketBatch({p});
+
+  ctx.param_desc = "single=" + std::to_string(single.size()) +
+                   " batch1=" + std::to_string(batch.size());
+
+  // ★ 逐字节相同 —— 这是"批量没有另起一套实现"的铁证
+  STRATUM_CHECK_EQ(batch.size(), single.size());
+  STRATUM_CHECK_TRUE(std::memcmp(batch.data(), single.data(), single.size()) == 0);
+}
+
+// ② 空批次 → 空（调用方应把它当 no-op，而不是发一个只有 Header 的空包）
+STRATUM_TEST(RtpsPacketBatch, EmptyBatchProducesNothing) {
+  const auto buf = packet::BuildDataPacketBatch({});
+  ctx.param_desc = "size=" + std::to_string(buf.size());
+  STRATUM_CHECK_TRUE(buf.empty());
+}
+
+// ③ N=3，不同 writer/sn/source_ts → 3 个 DATA + 3 个 INFO_TS
+STRATUM_TEST(RtpsPacketBatch, ThreeSamplesProduceThreeDataSubmessages) {
+  std::vector<packet::DataPacketParams> samples;
+  for (int i = 0; i < 3; ++i) {
+    packet::DataPacketParams p;
+    std::memcpy(p.prefix, kPrefix, 12);
+    // 故意用不同 writer_entity：证明跨 topic（不同 writer）能合进一个 Message
+    p.writer_entity = packet::kEntityUserWriter + static_cast<uint32_t>(i);
+    p.sn = 100 + i;
+    p.payload = std::string(4 + i, 'A' + i);
+    p.source_ts_ns = 1700000000000000000LL + i * 1000000LL;
+    samples.push_back(p);
+  }
+
+  const auto buf = packet::BuildDataPacketBatch(samples);
+  const auto subs = ScanSubmessages(buf);
+  const size_t n_ts = CountId(subs, packet::kSubInfoTs);
+  const size_t n_data = CountId(subs, packet::kSubData);
+
+  ctx.param_desc = "size=" + std::to_string(buf.size()) +
+                   " info_ts=" + std::to_string(n_ts) +
+                   " data=" + std::to_string(n_data);
+
+  STRATUM_CHECK_TRUE(std::memcmp(buf.data(), "RTPS", 4) == 0);
+  STRATUM_CHECK_EQ(n_ts, static_cast<size_t>(3));
+  STRATUM_CHECK_EQ(n_data, static_cast<size_t>(3));
+
+  // 每个 DATA 的 writerId 必须是各自的（证明没有串用同一个 writer）
+  std::vector<uint32_t> wids;
+  for (const auto& s : subs) {
+    if (s.id == packet::kSubData) wids.push_back(WriterIdOf(buf, s));
+  }
+  STRATUM_CHECK_EQ(wids.size(), static_cast<size_t>(3));
+  for (size_t i = 0; i < wids.size(); ++i) {
+    STRATUM_CHECK_EQ(static_cast<int>(wids[i]),
+                     static_cast<int>(packet::kEntityUserWriter + i));
+  }
+}
+
+// ④ 每条 INFO_TS 的值必须是各自的 source_ts（不能共用第一个）
+STRATUM_TEST(RtpsPacketBatch, EachInfoTsCarriesItsOwnTimestamp) {
+  const int64_t kBase = 1700000000000000000LL;
+  std::vector<packet::DataPacketParams> samples;
+  for (int i = 0; i < 3; ++i) {
+    packet::DataPacketParams p;
+    std::memcpy(p.prefix, kPrefix, 12);
+    p.sn = static_cast<uint64_t>(i) + 1;
+    p.payload = "X";
+    p.source_ts_ns = kBase + static_cast<int64_t>(i) * 5000000000LL;  // 差 5 秒
+    samples.push_back(p);
+  }
+
+  const auto buf = packet::BuildDataPacketBatch(samples);
+  const auto subs = ScanSubmessages(buf);
+
+  std::vector<uint32_t> secs;
+  for (const auto& s : subs) {
+    if (s.id != packet::kSubInfoTs) continue;
+    uint32_t sec = 0, frac = 0;
+    TimeTsOf(buf, s, &sec, &frac);
+    secs.push_back(sec);
+  }
+  ctx.param_desc = "info_ts_count=" + std::to_string(secs.size());
+  STRATUM_CHECK_EQ(secs.size(), static_cast<size_t>(3));
+
+  // 三个秒数必须互不相同且递增（间隔 5 秒 → 秒数差 5）
+  if (secs.size() == 3) {
+    STRATUM_CHECK_EQ(static_cast<int>(secs[1] - secs[0]), 5);
+    STRATUM_CHECK_EQ(static_cast<int>(secs[2] - secs[1]), 5);
+  }
+}
+
+// ⑤ 单条 payload 超上限 → 整批返回空（不发畸形报文）
+//
+// 【诚实标注】这条用例实际是被**总长检查**（60000）拦下的，不是单条检查（65535）：
+//   因为 65535 > 60000，任何"单条超界"的批次必然先撞总长上限。
+// 所以实现里那道单条检查目前是**防御性代码**（把总长提到 64KiB+ 时才会走到）。
+// 不这样标注的话，后人会误以为"单条检查有测试覆盖"。
+//
+// 本用例真正验证的是：**整批拒绝，而不是跳过坏的那条继续发** ——
+// 后者会让调用方以为全部发成功（静默丢数据）。
+STRATUM_TEST(RtpsPacketBatch, OversizedSingleSampleRejectsWholeBatch) {
+  std::vector<packet::DataPacketParams> samples;
+  {
+    packet::DataPacketParams p;
+    std::memcpy(p.prefix, kPrefix, 12);
+    p.sn = 1;
+    p.payload = "ok";
+    samples.push_back(p);
+  }
+  {
+    packet::DataPacketParams p;
+    std::memcpy(p.prefix, kPrefix, 12);
+    p.sn = 2;
+    // 65535 - 20 = 65515 是 DATA 子消息体的上限；这里再多 1 字节
+    p.payload = std::string(65516, 'Z');
+    samples.push_back(p);
+  }
+
+  const auto buf = packet::BuildDataPacketBatch(samples);
+  ctx.param_desc = "size=" + std::to_string(buf.size());
+  // 必须整批拒绝：不能"跳过坏的那条、发出去剩下的"——
+  // 那会让调用方以为全部发成功（静默丢数据）。
+  STRATUM_CHECK_TRUE(buf.empty());
+}
+
+// ⑥ 总长超 60000 → 返回空
+STRATUM_TEST(RtpsPacketBatch, OversizedTotalRejectsBatch) {
+  std::vector<packet::DataPacketParams> samples;
+  // 40 条 × 1600 字节 ≈ 64000 > 60000
+  for (int i = 0; i < 40; ++i) {
+    packet::DataPacketParams p;
+    std::memcpy(p.prefix, kPrefix, 12);
+    p.sn = static_cast<uint64_t>(i) + 1;
+    p.payload = std::string(1600, 'Y');
+    samples.push_back(p);
+  }
+  const auto buf = packet::BuildDataPacketBatch(samples);
+  ctx.param_desc = "samples=40 size=" + std::to_string(buf.size());
+  STRATUM_CHECK_TRUE(buf.empty());
+}
+
+// ⑦ 带宽收益的直接证据：批量报文 < N × 单发报文
+STRATUM_TEST(RtpsPacketBatch, BatchIsSmallerThanN_TimesSingle) {
+  const int kN = 10;
+  const std::string kPayload(24, 'P');   // HelloWorld 量级
+
+  size_t single_total = 0;
+  std::vector<packet::DataPacketParams> samples;
+  for (int i = 0; i < kN; ++i) {
+    packet::DataPacketParams p;
+    std::memcpy(p.prefix, kPrefix, 12);
+    p.writer_entity = packet::kEntityUserWriter;
+    p.sn = static_cast<uint64_t>(i) + 1;
+    p.payload = kPayload;
+    p.source_ts_ns = 1700000000000000000LL + i * 1000000LL;
+    samples.push_back(p);
+    single_total += packet::BuildDataPacket(p).size();
+  }
+  const auto batch = packet::BuildDataPacketBatch(samples);
+
+  const size_t saved = single_total - batch.size();
+  const double pct = single_total ? (100.0 * static_cast<double>(saved) /
+                                     static_cast<double>(single_total)) : 0.0;
+  ctx.param_desc = "single_" + std::to_string(kN) + "=" + std::to_string(single_total) +
+                   " batch=" + std::to_string(batch.size()) +
+                   " saved=" + std::to_string(saved) +
+                   " (" + std::to_string(static_cast<int>(pct)) + "%)";
+
+  // 【实测数字打到 stdout】测试框架只在失败时打印 param_desc，
+  // 而这条用例是 PASS 的 —— 所以数字必须显式 printf，否则拿不到"测出来的值"。
+  // 含 IP(20)+UDP(8) 的线上字节：单发 N 个包 vs 批量 1 个包。
+  const size_t single_wire = single_total + kN * 28;
+  const size_t batch_wire = batch.size() + 28;
+  std::printf(
+      "      [实测] payload=24B N=%d | RTPS: 单发=%zu 批量=%zu 省=%zu(%d%%) | "
+      "含IP/UDP: %zu vs %zu 省=%zu(%d%%) | sendto 次数 %d vs 1\n",
+      kN, single_total, batch.size(), saved,
+      static_cast<int>(pct), single_wire, batch_wire, single_wire - batch_wire,
+      static_cast<int>(100.0 * static_cast<double>(single_wire - batch_wire) /
+                       static_cast<double>(single_wire)),
+      kN);
+
+  // 批量必须更小；按结构它应省掉 (N-1) × (Message Header 20 + INFO_DST 16)
+  STRATUM_CHECK_LT(batch.size(), single_total);
+  // 省下的量级：至少 (N-1)*20（保守下界，只算 Message Header）
+  STRATUM_CHECK_LE(static_cast<size_t>((kN - 1) * 20), saved);
 }
 
 STRATUM_TEST_MAIN()
