@@ -1572,6 +1572,30 @@ Status RtpsWriter::PublishBatch(const std::vector<BatchSample>& samples) {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 【无对端：不能静默成功】—— 与 Publish 的语义对齐
+  //
+  // `Publish` 在 `sent == 0` 时把数据放进 `pending_` 并返回 NotFound，
+  // 让调用方知道"没发出去、但已缓存待补发"。批量这里原本**无条件返回 OK**，
+  // 于是同一件事在两条路径上有两种结果，而且批量那侧数据永久丢失且不报错。
+  //
+  // 【为什么降级为逐条而不是照抄入队】`pending_` 的一条记录对应「一个完整报文」，
+  // 而批量的一个报文含 N 条样本 —— 无法按样本入队。逐条调 Publish 是最小改动、
+  // 且能让每条都走它自己的缓存路径。
+  // 代价：无对端时退化成逐条（慢），但那本来就是异常情况，不是热路径。
+  // -------------------------------------------------------------------------
+  if (sent == 0) {
+    for (const auto& s : samples) {
+      const Status st = Publish(s.topic_name, s.type_name, s.payload,
+                                s.source_ts_ns);
+      // Publish 在无对端时返回 NotFound，但数据已进 pending —— 不算失败
+      if (!st.ok() && !st.IsNotFound()) return st;
+    }
+    return Status::NotFound(
+        "尚无已发现的对端 Reader（批量已降级为逐条缓存 " +
+        std::to_string(samples.size()) + " 条待补发）");
+  }
+
   st_packets_.fetch_add(sent, std::memory_order_relaxed);
   st_data_sent_.fetch_add(dpps.size(), std::memory_order_relaxed);
   if (dpps.size() >= 2) {

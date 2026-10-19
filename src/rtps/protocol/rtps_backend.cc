@@ -170,6 +170,24 @@ Status RtpsSink::Publish(const ReceivedSample& sample) {
                          sample.source_timestamp_ns);
 }
 
+Status RtpsSink::PublishBatch(const std::vector<ReceivedSample>& samples) {
+  if (!open_) return Status::InvalidArgument("RtpsSink 未打开");
+  if (samples.empty()) return Status::OK();   // 空批次是合法 no-op
+
+  // ReceivedSample -> RtpsWriter::BatchSample（只取发送需要的 4 个字段）
+  std::vector<RtpsWriter::BatchSample> batch;
+  batch.reserve(samples.size());
+  for (const auto& s : samples) {
+    RtpsWriter::BatchSample b;
+    b.topic_name = s.topic_name;
+    b.type_name = s.type_name;
+    b.payload = s.payload;
+    b.source_ts_ns = s.source_timestamp_ns;
+    batch.push_back(std::move(b));
+  }
+  return writer_.PublishBatch(batch);
+}
+
 Status RtpsSink::WaitForAcknowledgments(uint64_t timeout_ms) {
   if (!open_) return Status::InvalidArgument("RtpsSink 未打开");
   return writer_.WaitForAcknowledgments(timeout_ms);

@@ -67,6 +67,12 @@ class RtpsSink : public ISink {
   bool IsOpen() const override;
 
   Status Publish(const ReceivedSample& sample) override;
+
+
+  
+  // 真批量：一个 RTPS Message 装多条 DATA 子消息，每 peer 一次 sendto。
+  // 默认的 ISink::PublishBatch 只是循环单发，省不到带宽，所以这里必须 override。
+  Status PublishBatch(const std::vector<ReceivedSample>& samples) override;
   Status WaitForAcknowledgments(uint64_t timeout_ms) override;
 
   bool ReadyForPublish() const override { return writer_.HasMatchedReader(); }

@@ -323,6 +323,20 @@ struct PlayerConfig {
   // 默认 0 表示不等待（适用于内存/模拟后端，它们没有发现过程）。
   uint64_t discovery_wait_ms = 0;
 
+  // 批量发布的批大小（**默认 1 = 逐条，行为与改动前完全一致**）。
+  //
+  // 【为什么默认 1】回放有三处已验证的时序（VOLATILE 首条要 sleep 500ms、
+  // 协作式停止、publish_failed_ 的计数语义）。默认逐条让这次改动**零回归**，
+  // 想省带宽时显式设 >1 即可（例如 `stratum play --batch-size 16`）。
+  //
+  // 【收益】一次 sendto 发 N 条：省 (N-1)×(Message Header 20 + INFO_DST 16)
+  // 字节，外加 (N-1)×28 字节的 IP/UDP 头。实测（payload=24B、N=10、含 IP/UDP）
+  // 1080 → 648 字节，省 40%。**这是报文级数字，真实链路还要算分片/重传/HEARTBEAT。**
+  //
+  // 【上限】建议 ≤ 32：批太大会让"首条延迟"变长（整批攒齐才发），
+  // 也会让单包接近 MTU 而触发 IP 分片。
+  uint32_t batch_size = 1;
+
   // 是否在回放结束后等待确认
   bool wait_for_ack = false;
   uint64_t ack_timeout_ms = 5000;

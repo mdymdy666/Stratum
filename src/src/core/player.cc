@@ -184,6 +184,39 @@ Status Player::Play(const TimeRange& range, const PlayerConfig& config) {
     // 多留只会多制造重复内容。
     std::vector<protocol::ReceivedSample> head_samples;
 
+    // -----------------------------------------------------------------------
+    // 批量发送（batch_size > 1 时启用；默认 1 走原来的逐条路径）
+    //
+    // 【为什么放在这里】保持"每条都过一遍速率控制/回调/进度"的既有结构，
+    // 只把"怎么发"换掉。这样改动面最小，三处已验证的时序不受影响。
+    // -----------------------------------------------------------------------
+    const uint32_t batch_size =
+        (config.batch_size > 1) ? config.batch_size : 1;
+    std::vector<protocol::ReceivedSample> batch_buf;
+    if (batch_size > 1) batch_buf.reserve(batch_size);
+
+    // 把当前缓冲发出去。返回 false 表示这一批失败了（已计入 publish_failed_）。
+    auto flush_batch = [&]() -> bool {
+      if (batch_buf.empty()) return true;
+      const Status st = sink->PublishBatch(batch_buf);
+      if (!st.ok()) {
+        // 【按批内条数计】publish_failed_ 的语义是"多少条没发出去"，
+        // 不是"失败了几次"。批失败 = 批内所有条都没发出。
+        const uint64_t n = static_cast<uint64_t>(batch_buf.size());
+        if (publish_failed_.fetch_add(n, std::memory_order_relaxed) == 0) {
+          std::fprintf(stderr,
+                       "[player] 批量发布失败（%llu 条，后续同类失败只计数）: %s\n",
+                       static_cast<unsigned long long>(n),
+                       st.ToString().c_str());
+          std::fflush(stderr);
+        }
+        batch_buf.clear();
+        return false;
+      }
+      batch_buf.clear();
+      return true;
+    };
+
     for (const auto& item : items) {
       if (stop_requested_.load(std::memory_order_acquire)) {
         break;
@@ -207,31 +240,62 @@ Status Player::Play(const TimeRange& range, const PlayerConfig& config) {
         }
       }
 
-      // 【不得忽略返回值】发布失败（例如样本超过 RTPS 单子消息上限、
-      // 报文构造失败）必须可见，否则会表现为"回放端显示已发布 N 条、
-      // 订阅端一条都收不到"这种最难查的静默失败。
-      const Status pub_status = sink->Publish(item.sample);
-      if (!pub_status.ok()) {
-        if (publish_failed_.fetch_add(1, std::memory_order_relaxed) == 0) {
-          std::fprintf(stderr, "[player] 发布失败（后续同类失败只计数）: %s\n",
-                       pub_status.ToString().c_str());
-          std::fflush(stderr);
-        }
-        continue;
-      }
+      // 首条记录与用户回调是**逻辑事件**，与"怎么发"无关 —— 无论逐条还是批量，
+      // 都在这里做（回调语义是"这条样本处理到了"，不是"这条发出去了"）。
       if (head_samples.empty()) {
         head_samples.push_back(item.sample);
       }
       if (config.publish_callback) {
         config.publish_callback(item.sample);
       }
-      ++published;
+
+      if (batch_size <= 1) {
+        // ---- 原路径：逐条发送（行为与改动前逐字节一致）----
+        // 【不得忽略返回值】发布失败（例如样本超过 RTPS 单子消息上限、
+        // 报文构造失败）必须可见，否则会表现为"回放端显示已发布 N 条、
+        // 订阅端一条都收不到"这种最难查的静默失败。
+        const Status pub_status = sink->Publish(item.sample);
+        if (!pub_status.ok()) {
+          if (publish_failed_.fetch_add(1, std::memory_order_relaxed) == 0) {
+            std::fprintf(stderr, "[player] 发布失败（后续同类失败只计数）: %s\n",
+                         pub_status.ToString().c_str());
+            std::fflush(stderr);
+          }
+          continue;
+        }
+        ++published;
+      } else {
+        // ---- 批量路径：攒够一批再发 ----
+        batch_buf.push_back(item.sample);
+        if (batch_buf.size() >= batch_size) {
+          const uint64_t n = static_cast<uint64_t>(batch_buf.size());
+          if (!flush_batch()) {
+            // 整批失败：这 n 条都没发出去，不累加 published，继续处理后续
+            // （不 break —— 一次失败不该终止整次回放，与逐条路径的
+            //  `continue` 保持一致）。
+          } else {
+            published += n;
+          }
+        }
+      }
 
       {
         std::lock_guard<std::mutex> lock(progress_mutex_);
         progress_.cursor_ns = item.ts;
         progress_.published = published;
       }
+    }
+
+    // 【必须 flush 剩余】循环结束时缓冲里可能还有不足一批的样本。
+    // 忘了这一步会表现为"回放了 100 条、订阅端收到 96 条"（最后 4 条没发），
+    // 而且只在 batch_size 不整除总数时出现 —— 最难查的那类。
+    if (batch_size > 1 && !batch_buf.empty()) {
+      const uint64_t n = static_cast<uint64_t>(batch_buf.size());
+      if (flush_batch()) {
+        published += n;
+      }
+      std::lock_guard<std::mutex> lock(progress_mutex_);
+      progress_.published = published;
     }
 
     // 【发送窗口统计】—— 外部用 shell 计时会把进程启动（Fast DDS 初始化 +

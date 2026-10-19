@@ -130,6 +130,29 @@ class ISink {
   // 返回 OK 表示已交给后端（不保证对端收到）。
   virtual Status Publish(const ReceivedSample& sample) = 0;
 
+  // -------------------------------------------------------------------------
+  // 批量发布（可选能力）。
+  //
+  // 【默认实现就是循环单发】所以任何已有后端都不需要改，行为与逐个 Publish
+  // 完全一致。**只有能真正省带宽的后端才应该 override** —— 目前是 RtpsSink：
+  // 它把一个 Message 装多条 DATA 子消息，省掉每条的 Message Header + IP/UDP 头。
+  //
+  // 【失败语义：整批失败】实现应当"要么全部交给后端，要么返回错误"，
+  // 不要部分成功 —— 调用方（Player）按批计 `publish_failed_`，
+  // 若中途跳过坏条，就会出现"已发布条数"与"实际发出"对不上的静默错误。
+  //
+  // 【为什么默认实现不返回 kNotSupported】因为循环单发在语义上是**正确的**
+  // （只是不省带宽）。返回 NotSupported 会迫使上层写两条路径，而多数后端
+  // 并不需要区分这两者。
+  // -------------------------------------------------------------------------
+  virtual Status PublishBatch(const std::vector<ReceivedSample>& samples) {
+    for (const auto& s : samples) {
+      Status st = Publish(s);
+      if (!st.ok()) return st;
+    }
+    return Status::OK();
+  }
+
 
   // 尚未被对端确认的样本（可选能力，默认空）。
   //

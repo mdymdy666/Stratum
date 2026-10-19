@@ -61,6 +61,12 @@ struct PlayOpts {
 
   double rate = 1.0;
 
+  // 批量发布：一次 sendto 发 N 条（1 = 逐条，默认）。
+  // 省的是每条的 Message Header(20B) + INFO_DST(16B) 与 IP/UDP 头(28B)。
+  // 实测（payload=24B、N=10）：1080 → 648 字节，省 40%
+  // ——**这是报文级数字**，真实链路还要算分片/重传/HEARTBEAT。
+  uint32_t batch_size = 1;
+
   std::vector<std::pair<std::string, std::string>> remap;
   bool allow_original_names = false;
 
@@ -114,6 +120,20 @@ int CmdPlay(const std::vector<std::string>& args, GlobalOptions g) {
       const std::string* v = next();
       if (!v) return Fail(kUsage, "--topic 缺少参数值", "", "示例: --topic sensor/temp");
       o.topics.push_back(*v); continue;
+    }
+    if (a == "--batch-size") {
+      const std::string* v = next();
+      if (v == nullptr) {
+        return Fail(kUsage, "--batch-size 缺少参数值", "",
+                    "整数 1~32；1 = 逐条发送（默认）");
+      }
+      const long n = std::strtol(v->c_str(), nullptr, 10);
+      if (n < 1 || n > 32) {
+        return Fail(kUsage, "--batch-size 超出范围: " + *v, "必须在 1~32 之间",
+                    "1 = 逐条；建议 8~16（再大首条延迟变长、单包接近 MTU）");
+      }
+      o.batch_size = static_cast<uint32_t>(n);
+      continue;
     }
     if (a == "--rate") {
       const std::string* v = next();
@@ -323,6 +343,7 @@ int CmdPlay(const std::vector<std::string>& args, GlobalOptions g) {
   // -------------------------------------------------------------------------
   PlayerConfig pc;
   pc.rate = o.rate;
+  pc.batch_size = o.batch_size;   // 1 = 逐条（默认，行为不变）；>1 = 批量
 
   protocol::BackendConfig bc;
   bc.domain_id = o.domain;
